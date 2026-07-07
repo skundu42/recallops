@@ -1,0 +1,143 @@
+# RecallOps CI: two-phase retrieval regression gate (PRD FR-9.1).
+#
+# Phase 1 (job `gate`, BLOCKING, target < 5 min): ingest + eval + diff + funnel
+#   attribution. Posts `recall-report.md` as a PR comment and fails the check on
+#   a statistically-gated regression. No re-embedding, no counterfactual runs.
+#
+# Phase 2 (job `attribute`, ASYNC, non-blocking): runs the deep counterfactual
+#   pass and EDITS the same PR comment with verified causes. It reports its own
+#   status and never blocks merge; deep attribution is not promised instantly.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# REPO-SPECIFIC PLACEHOLDERS you must fill in (marked "TODO(you)" below):
+#   1. A committed/cached `.recall` store that already contains a BASELINE
+#      snapshot (the parent to diff against), a golden dataset, and, for
+#      statistical gating, a calibration record (`recall calibrate`). Without a
+#      base snapshot the gate no-ops ("first ingest"); without calibration it
+#      degrades to a report-only comment.
+#   2. Your embedding provider secret if you use a paid model (the built-in
+#      `local` provider is $0 and needs no key). Keep the cost gate honest:
+#      pass `--max-cost` rather than a blanket `--yes` for paid providers.
+#   3. `recall.yaml` at the repo root (from `recall init`) pointing `source:` at
+#      your docs and selecting the `local` or `pgvector` adapter.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: RecallOps CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  # ── Phase 1: blocking gate ────────────────────────────────────────────────
+  gate:
+    name: Retrieval gate (phase 1)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write   # required for `gh pr comment`
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # TODO(you): export your provider key here if using a paid embedding model,
+      # e.g. OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install RecallOps
+        run: pip install -e .
+        # Or, once published: pip install recallops
+        # Add the pgvector extra if your adapter is pgvector: pip install -e '.[pg]'
+
+      # TODO(you): restore the baseline provenance store so there is a parent
+      # snapshot + dataset (+ calibration) to gate against. Options: actions/cache
+      # keyed on your corpus, a checked-in `.recall/`, or download from BYO
+      # object storage. Without this the gate has nothing to diff against.
+      - name: Restore RecallOps store (baseline snapshot + dataset + calibration)
+        uses: actions/cache@v4
+        with:
+          path: .recall
+          key: recall-store-${{ github.repository }}   # TODO(you): tune the key
+
+      - name: Run RecallOps gate (ingest + eval + diff + funnel)
+        id: gate
+        run: |
+          set +e
+          recall ci --config recall.yaml | tee recall-ci.log
+          echo "exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+          # `recall ci` prints the diff id for the async phase-2 pass.
+          DIFF_ID="$(grep -oE 'diff_[0-9a-f]+' recall-ci.log | head -1)"
+          echo "diff_id=${DIFF_ID}" >> "$GITHUB_OUTPUT"
+          echo "${DIFF_ID}" > recall-diff-id.txt
+
+      - name: Post phase-1 report as a PR comment
+        if: ${{ github.event_name == 'pull_request' }}
+        run: |
+          gh pr comment "${{ github.event.pull_request.number }}" \
+            --body-file recall-report.md
+          # `--edit-last` (recent gh) or a sticky-comment action lets phase 2
+          # update this same comment instead of appending a new one.
+
+      # Hand the store + report + diff id to the async phase-2 job.
+      - name: Upload RecallOps artifacts for phase 2
+        uses: actions/upload-artifact@v4
+        with:
+          name: recall-store
+          path: |
+            .recall
+            recall-report.md
+            recall-diff-id.txt
+          include-hidden-files: true
+
+      - name: Fail the check on a gated regression
+        if: ${{ steps.gate.outputs.exit_code != '0' }}
+        run: |
+          echo "::error::RecallOps gate failed: statistically significant retrieval regression."
+          exit 1
+
+  # ── Phase 2: async deep attribution (non-blocking) ────────────────────────
+  attribute:
+    name: Deep attribution (phase 2)
+    needs: gate
+    if: ${{ always() && github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    continue-on-error: true   # never blocks merge; reports its own status
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # TODO(you): same provider secret as phase 1 if a paid model is used.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install RecallOps
+        run: pip install -e .
+
+      - name: Download RecallOps artifacts from phase 1
+        uses: actions/download-artifact@v4
+        with:
+          name: recall-store
+
+      - name: Run counterfactual attribution and update the comment
+        run: |
+          DIFF_ID="$(cat recall-diff-id.txt)"
+          if [ -z "${DIFF_ID}" ]; then
+            echo "No diff id from phase 1 (nothing regressed / first ingest); skipping."
+            exit 0
+          fi
+          # Local provider is $0; for a paid model use --max-cost instead of --yes.
+          recall attribute "${DIFF_ID}" --arms auto --max-cost 5.00
+          # Re-render the report (it now includes the stored verified causes)
+          # and edit the phase-1 comment in place.
+          recall report --diff "${DIFF_ID}" --format md -o recall-report.md
+          gh pr comment "${{ github.event.pull_request.number }}" \
+            --edit-last --body-file recall-report.md

@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://github.com/OWNER/recallops/tree/main/docs
+    about: Read the docs (quickstart, sizing, phase-0 validation, publishing) before filing an issue.
+  - name: Security vulnerability
+    url: https://github.com/OWNER/recallops/security/advisories/new
+    about: Do not open a public issue for security reports; disclose privately (see SECURITY.md).
+  - name: Questions & discussion
+    url: https://github.com/OWNER/recallops/discussions
+    about: For usage questions, ideas, and open-ended discussion, please use Discussions.

@@ -1,0 +1,83 @@
+name: Release
+
+# Publishes RecallOps to PyPI when a GitHub Release is published.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# ONE-TIME SETUP: PyPI Trusted Publishing (OIDC, no API token)
+# ─────────────────────────────────────────────────────────────────────────────
+# This workflow authenticates to PyPI via OpenID Connect (OIDC) "Trusted
+# Publishing"; there is NO PyPI API token stored as a secret. Before the first
+# release you must register this workflow as a trusted publisher on PyPI:
+#
+#   1. Log in to https://pypi.org and open the project's
+#      "Publishing" settings (for a brand-new project use
+#      https://pypi.org/manage/account/publishing/ to pre-register a
+#      "pending" publisher).
+#   2. Add a GitHub Actions trusted publisher with:
+#        - Owner:            OWNER               (your GitHub org/user)
+#        - Repository:       recallops
+#        - Workflow name:    release.yml
+#        - Environment:      pypi                (must match the job below)
+#   3. In this repo's Settings -> Environments, create an environment named
+#      `pypi` (optionally add required reviewers / branch protection).
+#
+# NOTE ON THE DISTRIBUTION NAME: "recallops" is currently TAKEN on PyPI. The
+# import package stays `recallops`, but the *published* distribution name must
+# be finalised (and matched in pyproject `[project].name` + the trusted
+# publisher registration) before the first successful upload. See
+# docs/PUBLISHING.md.
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  release:
+    types: [published]
+  # Manual trigger for dry-runs / re-publishing a fixed build. Note: OIDC
+  # publishing still requires the `pypi` environment + trusted publisher.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pypi-publish:
+    name: Build and publish to PyPI
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      # Optional: surface the project page on the deployment once the name is
+      # finalised, e.g. url: https://pypi.org/p/recallops
+    permissions:
+      contents: read
+      id-token: write   # REQUIRED for OIDC Trusted Publishing (no API token)
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tooling
+        run: pip install build
+
+      - name: Build distributions
+        run: python -m build
+
+      - name: Validate distribution metadata
+        run: |
+          pip install twine
+          twine check dist/*
+
+      # Uses OIDC automatically; picks up dist/ by default. No `password:`.
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+      # ── Optional: TestPyPI dry-run ─────────────────────────────────────────
+      # To rehearse against TestPyPI instead of (or before) PyPI, register a
+      # trusted publisher on https://test.pypi.org the same way, point the job's
+      # `environment.name` at a `testpypi` environment, and swap the publish
+      # step for:
+      #
+      #   - name: Publish to TestPyPI
+      #     uses: pypa/gh-action-pypi-publish@release/v1
+      #     with:
+      #       repository-url: https://test.pypi.org/legacy/
