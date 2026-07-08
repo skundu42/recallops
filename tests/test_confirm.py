@@ -13,6 +13,7 @@ from recallops.ingest import build_pipeline, ingest
 from recallops.models import (
     Arm,
     ArmResult,
+    AttributionReport,
     DiffResult,
     EvalResult,
     Factor,
@@ -21,6 +22,7 @@ from recallops.models import (
     GoldenDataset,
     QueryDiff,
     QueryEval,
+    VerifiedCause,
 )
 from recallops.pipeline import chunkers
 from recallops.retrieval import RetrievalEngine
@@ -160,6 +162,53 @@ class TestConfirmationRuleUnit:
         reports = confirm_causes(_hand_diff(), _hand_dataset(), arm_results, arms,
                                  {"q": _hand_funnel()}, {})
         assert fidelity_check(reports, arm_results, arms, _hand_dataset(), 5) == 1.0
+
+    def test_fidelity_catches_false_cause(self):
+        # Mechanism test (the guard is ~1.0 by construction, so this feeds an
+        # input the deterministic pipeline would not itself produce): a cause
+        # whose arm eval recovers the target's rank but does NOT restore the
+        # primary metric must not count as genuine, proving the predicate is
+        # actually applied rather than hard-coded to 1.0.
+        def qe(recall5):
+            return QueryEval(query_id="q", ranked_chunks=[], ranked_docs=[],
+                             target_rank=1, hit_at={}, metrics={"recall@5": recall5}, run=None)
+
+        def eval_with(recall5):
+            return EvalResult(run_id="r", snapshot_id="s", dataset_id="ds", mode="replay",
+                              adapter="none", created_at="", k_values=(1, 5, 10),
+                              per_query={"q": qe(recall5)}, aggregate={})
+
+        arms = build_arms([Factor("chunk", "stage"), Factor("embed", "stage")])
+        chunk_arm = Arm.build({"chunk": "A", "embed": "B"}).arm_id
+        arm_results = {chunk_arm: ArmResult(chunk_arm, eval_with(0.5), 0)}
+        before = QueryEval("q", [], [], 3, {}, {"recall@5": 1.0}, None)
+        diffres = DiffResult("d", "a", "b", "ds", {"chunk": {}}, False, {},
+                             {"q": QueryDiff("q", "regressed", "stable", {}, before, qe(0.0))},
+                             {}, False, True)
+        report = AttributionReport(
+            query_id="q", classification="regressed", stability="stable",
+            funnel=_hand_funnel(), chunk_fate=None,
+            verified_causes=[VerifiedCause(factor="chunk", arm_id=chunk_arm,
+                                           recovered_rank=1, status="verified")],
+            hypotheses=[], narrative="",
+        )
+        assert fidelity_check({"q": report}, arm_results, arms, _hand_dataset(), 5,
+                              diffres=diffres) == 0.0
+
+    def test_fidelity_topk_recovery_above_k_not_false_failed(self):
+        # A cause legitimately verified under the 'topk' threshold can recover
+        # to a rank above top_k. fidelity_check must not false-fail it when
+        # diffres is absent (before-rank unknown) — the release blocker must
+        # trip on real bugs, not on the topk recovery mode.
+        arms, arm_results, chunk_arm, _ = _hand_setup(chunk_rank=8, embed_rank=8)
+        report = AttributionReport(
+            query_id="q", classification="regressed", stability="stable",
+            funnel=_hand_funnel(), chunk_fate=None,
+            verified_causes=[VerifiedCause(factor="chunk", arm_id=chunk_arm,
+                                           recovered_rank=8, status="verified")],
+            hypotheses=[], narrative="",
+        )
+        assert fidelity_check({"q": report}, arm_results, arms, _hand_dataset(), 5) == 1.0
 
     def test_no_op_factor_not_verified_when_metric_not_restored(self):
         # Multi-source regression (finding #1/#5): the first expected source stays

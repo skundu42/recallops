@@ -72,20 +72,27 @@ def _metric_keys(k_values: tuple[int, ...]) -> list[str]:
     return keys
 
 
-def _case_eval(case: GoldenCase, run: QueryRun, doc_map: dict[str, str],
+def _case_eval(case: GoldenCase, run: QueryRun, doc_map: dict[str, tuple[str, ...]],
                k_values: tuple[int, ...]) -> QueryEval:
+    """Score one golden case. ``doc_map`` maps chunk_id to every source path of
+    its document (byte-identical files share one doc_id); a chunk counts for an
+    expected source when ANY of its paths matches, and ``ranked_docs`` reads as
+    the matched path so metrics see the name the golden case used."""
+    want = set(case.expected_sources)
     ranked_docs: list[str] = []
     seen: set[str] = set()
     for cid, _ in run.final:
-        doc = doc_map.get(cid)
-        if doc is not None and doc not in seen:
+        paths = doc_map.get(cid)
+        if not paths:
+            continue
+        doc = next((p for p in paths if p in want), paths[0])
+        if doc not in seen:
             seen.add(doc)
             ranked_docs.append(doc)
 
-    want = set(case.expected_sources)
     target_rank = next(
         (rank for rank, (cid, _) in enumerate(run.final, start=1)
-         if doc_map.get(cid) in want),
+         if any(p in want for p in doc_map.get(cid, ()))),
         None,
     )
 
@@ -117,7 +124,7 @@ def evaluate(store: ProjectStore, manifest: SnapshotManifest, dataset: GoldenDat
     k_values = tuple(int(k) for k in k_values)
 
     engine = RetrievalEngine(store, manifest, adapter=adapter if mode == "live" else None)
-    doc_map = engine.chunk_doc_map()
+    doc_map = engine.chunk_doc_paths()
 
     per_query: dict[str, QueryEval] = {}
     for case in dataset.cases:

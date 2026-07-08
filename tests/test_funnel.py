@@ -74,7 +74,7 @@ class TestTracerChunk:
             query_id="q", ranked_chunks=[("c1", 0.9), ("c2", 0.8), ("c3", 0.7)],
             ranked_docs=[], target_rank=2, hit_at={}, metrics={}, run=None,
         )
-        doc_map = {"c1": "other.md", "c2": "billing/refunds.md", "c3": "billing/refunds.md"}
+        doc_map = {"c1": ("other.md",), "c2": ("billing/refunds.md",), "c3": ("billing/refunds.md",)}
         assert tracer_chunk(before, ["billing/refunds.md"], doc_map) == "c2"
 
     def test_none_when_no_expected_chunk(self):
@@ -82,7 +82,7 @@ class TestTracerChunk:
             query_id="q", ranked_chunks=[("c1", 0.9), ("c2", 0.8)],
             ranked_docs=[], target_rank=None, hit_at={}, metrics={}, run=None,
         )
-        doc_map = {"c1": "a.md", "c2": "b.md"}
+        doc_map = {"c1": ("a.md",), "c2": ("b.md",)}
         assert tracer_chunk(before, ["billing/refunds.md"], doc_map) is None
 
     def test_matches_any_of_multiple_expected(self):
@@ -90,7 +90,7 @@ class TestTracerChunk:
             query_id="q", ranked_chunks=[("c1", 0.9), ("c2", 0.8)],
             ranked_docs=[], target_rank=1, hit_at={}, metrics={}, run=None,
         )
-        doc_map = {"c1": "sales/pricing.md", "c2": "legal/dpa.md"}
+        doc_map = {"c1": ("sales/pricing.md",), "c2": ("legal/dpa.md",)}
         assert tracer_chunk(before, ["legal/dpa.md", "sales/pricing.md"], doc_map) == "c1"
 
 
@@ -219,7 +219,7 @@ def test_intact_tracer_with_new_id_followed_to_descendant():
     qdiff = QueryDiff("q", "regressed", "stable", {"recall@5": 0.0}, before, after)
     alignment = {"ch_old": ChunkFate("intact", 0.98, "ch_old", ["ch_new"])}
     case = GoldenCase("q", "question", ["doc.md"])
-    engine_a = SimpleNamespace(chunk_doc_map=lambda: {"ch_old": "doc.md", "ch_new": "doc.md"})
+    engine_a = SimpleNamespace(chunk_doc_paths=lambda: {"ch_old": ("doc.md",), "ch_new": ("doc.md",)})
     engine_b = SimpleNamespace(
         chunk_texts=lambda: {"ch_new": "content"},          # ch_old is NOT present
         exact_dense_ranks=lambda q: [("ch_new", 0.8)],

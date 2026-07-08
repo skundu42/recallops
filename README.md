@@ -247,9 +247,11 @@ This is characterization, **not** a verified mechanism; see
 Statistical gating is **never-flaky by design** and needs a one-time calibration per
 snapshot: `recall calibrate` re-runs an identical snapshot N times (rebuilding the
 index where the adapter supports it), derives a near-tie threshold ε, and excludes
-near-ties from regression counts. Aggregate deltas are gated by a bootstrap 95% CI,
-per-query flips by McNemar's exact test, corrected across tags with Benjamini-Hochberg
-FDR.
+near-ties from every regression signal. Stable-query deltas are gated by a bootstrap
+95% CI and stable-query flips by McNemar's exact test, corrected across tags with
+Benjamini-Hochberg FDR. Because near-ties feed no signal, serving noise never reddens
+the gate; the trade-off is that a regression visible only as near-ties is below the
+calibrated noise floor and is reported (with the excluded count) rather than gated.
 
 ```bash
 recall calibrate --snapshot latest --dataset golden

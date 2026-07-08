@@ -242,3 +242,26 @@ class TestRunId:
     def test_run_id_varies_with_k_values(self, replay_eval, env):
         other = evaluate(env.store, env.manifest, env.dataset, k_values=(1, 3))
         assert other.run_id != replay_eval.run_id
+
+
+class TestDuplicateContentDocs:
+    def test_expected_source_matches_any_alias_path(self, tmp_path):
+        # Byte-identical files at different paths share one doc_id; a golden
+        # case naming EITHER path must score when the shared content is
+        # retrieved (a collapsed doc-map silently zeroes all but one path).
+        store = ProjectStore(tmp_path / "proj")
+        docs = tmp_path / "docs"
+        docs.mkdir()
+        text = "# Refunds\n\nRefunds are processed within five business days.\n"
+        (docs / "a_dup.md").write_text(text)
+        (docs / "z_dup.md").write_text(text)
+        (docs / "other.md").write_text("# Shipping\n\nShipping takes two days.\n")
+        manifest = ingest(store, docs, build_pipeline({}), adapter=None).manifest
+        dataset = GoldenDataset("gold-v1", [
+            GoldenCase("q_first", "how long do refunds take", ["a_dup.md"]),
+            GoldenCase("q_last", "how long do refunds take", ["z_dup.md"]),
+        ])
+        result = evaluate(store, manifest, dataset)
+        for qid in ("q_first", "q_last"):
+            assert result.per_query[qid].metrics["recall@5"] == 1.0, qid
+            assert result.per_query[qid].target_rank is not None, qid

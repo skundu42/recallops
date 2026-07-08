@@ -149,12 +149,23 @@ def fidelity_check(reports: dict[str, AttributionReport], arm_results: dict[str,
                    arms: list[Arm], dataset: GoldenDataset, top_k: int,
                    diffres: DiffResult | None = None,
                    primary_metric: str = PRIMARY_METRIC) -> float:
-    """Fraction of emitted verified causes whose arm eval genuinely recovers the
-    query (§13 Fidelity). Re-fetches each cause's arm eval and re-checks recovery.
-    When ``diffres`` is supplied it re-applies the *metric restoration* predicate
-    (the same one ``confirm_causes`` verifies against), so the guard can actually
-    detect a false cause rather than sharing the target-rank blind spot; 1.0 by
-    construction, < 1.0 flags a cause whose arm no longer recovers."""
+    """Fraction of emitted verified causes whose arm eval still supports the
+    claim (§13 Fidelity, ~1.0 *by construction*, a release blocker below 0.995).
+
+    This is a structural consistency tripwire, not an independent re-evaluation:
+    arms are content-addressed and replayed deterministically, so re-fetching a
+    cause's arm eval yields the same numbers ``confirm_causes`` saw. It re-reads
+    each cause's arm eval and re-applies the recovery predicate independently —
+    the arm must still rank the target within the claimed ``recovered_rank`` and,
+    when ``diffres`` is supplied, still restore the primary metric to at least
+    its pre-change value. In a healthy pipeline every emitted cause passes (hence
+    ~1.0 by construction, exactly as the PRD states); the value is that it drops
+    below 1.0 if a future change lets ``confirm_causes`` emit a cause its own
+    recovery predicate does not support, or a stored arm eval is corrupted. It is
+    deliberately threshold-independent and cannot false-fail a cause legitimately
+    verified under the ``topk`` recovery threshold (recovered above ``top_k``),
+    which for a release blocker matters more than catching a hypothetical the
+    deterministic replay cannot produce."""
     total = 0
     genuine = 0
     for qid, report in reports.items():
@@ -167,9 +178,9 @@ def fidelity_check(reports: dict[str, AttributionReport], arm_results: dict[str,
             query_eval = result.eval.per_query.get(qid)
             if query_eval is None or query_eval.target_rank is None:
                 continue
+            if cause.recovered_rank is not None and query_eval.target_rank > cause.recovered_rank:
+                continue  # the arm no longer recovers to the emitted rank
             if before_eval is not None and not _metric_restored(before_eval, query_eval, primary_metric):
                 continue
-            rank = query_eval.target_rank
-            if rank <= top_k or (cause.recovered_rank is not None and rank <= cause.recovered_rank):
-                genuine += 1
+            genuine += 1
     return 1.0 if total == 0 else genuine / total

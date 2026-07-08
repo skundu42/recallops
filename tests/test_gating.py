@@ -357,3 +357,109 @@ class TestRawGate:
     def test_raw_requires_expression(self, regression_env):
         with pytest.raises(ValueError):
             evaluate_gate(regression_env.diffres, None, mode="raw")
+
+
+class TestBootstrapCIExcludesNearTies:
+    """Never-flaky invariant (FR-9): near-tie (unstable) queries are quarantined
+    from EVERY gate signal. A handful of noise flips among near-ties carries a
+    full -1.0 metric delta each; leaking them into the bootstrap CI turns the
+    gate red on a no-change PR."""
+
+    def test_noise_only_flips_pass_the_gate(self):
+        from recallops.models import DiffResult, QueryDiff, QueryEval
+
+        def qe(recall5, hit5, target_rank):
+            return QueryEval("", [("c", 1.0)], ["d"], target_rank, {5: hit5},
+                             {"recall@5": recall5}, None)
+
+        queries = {}
+        for i in range(4):  # near-tie flips: rank 5 -> 6 within epsilon
+            qid = f"tie{i}"
+            queries[qid] = QueryDiff(qid, "regressed", "unstable", {"recall@5": -1.0},
+                                     qe(1.0, True, 5), qe(0.0, False, 6))
+        for i in range(16):
+            qid = f"same{i}"
+            queries[qid] = QueryDiff(qid, "unchanged", "stable", {"recall@5": 0.0},
+                                     qe(1.0, True, 1), qe(1.0, True, 1))
+        diffres = DiffResult("d", "a", "b", "gold-v1", {}, False, {"recall@5": -0.2},
+                             queries, {}, False, True)
+        calibration = CalibrationRecord("a", 3, {"recall@5": 0.02}, 0.05, {}, "")
+
+        gate = evaluate_gate(diffres, calibration)
+
+        assert gate.details["near_tie_excluded"] == 4
+        assert gate.details["b"] == 0 and gate.details["c"] == 0
+        assert gate.significant_regression is False
+        assert gate.passed is True
+
+
+class TestNearTiesNeverRedden:
+    """FR-9 never-flaky (risk R1) is paramount: near-tie (unstable) queries feed
+    NO red signal — not the CI, not the flip counts. A regression small enough to
+    appear only as near-ties is below the calibrated noise floor and deliberately
+    not flagged (its size is surfaced in details instead), which is the price of
+    a 0% noise-driven red-gate rate. Any red near-tie signal — even a directional
+    one — has a nonzero false-positive rate under symmetric serving noise."""
+
+    def _diff(self, n_down, n_up, n_stable_unchanged):
+        from recallops.models import DiffResult, QueryDiff, QueryEval
+
+        def qe(hit5, target_rank):
+            return QueryEval("", [("c", 1.0)], ["d"], target_rank, {5: hit5},
+                             {"recall@5": 1.0 if hit5 else 0.0}, None)
+        queries = {}
+        i = 0
+        for _ in range(n_down):
+            queries[f"q{i}"] = QueryDiff(f"q{i}", "regressed", "unstable",
+                                         {"recall@5": -1.0}, qe(True, 5), qe(False, 6))
+            i += 1
+        for _ in range(n_up):
+            queries[f"q{i}"] = QueryDiff(f"q{i}", "improved", "unstable",
+                                         {"recall@5": 1.0}, qe(False, 6), qe(True, 5))
+            i += 1
+        for _ in range(n_stable_unchanged):
+            queries[f"q{i}"] = QueryDiff(f"q{i}", "unchanged", "stable",
+                                         {"recall@5": 0.0}, qe(True, 1), qe(True, 1))
+            i += 1
+        return DiffResult("d", "a", "b", "gold-v1", {}, False, {"recall@5": 0.0},
+                          queries, {}, False, True)
+
+    def test_all_near_tie_down_flips_still_pass_but_are_surfaced(self):
+        # Even 30 near-tie flips all one direction must not redden the gate —
+        # a directional near-tie test would false-red on symmetric noise too.
+        cal = CalibrationRecord("a", 3, {"recall@5": 0.02}, 0.05, {}, "")
+        gate = evaluate_gate(self._diff(30, 0, 10), cal)
+        assert gate.passed is True
+        assert gate.details["near_tie_excluded"] == 30
+        assert gate.details["n_unstable"] == 30
+
+    def test_symmetric_near_tie_noise_passes(self):
+        cal = CalibrationRecord("a", 3, {"recall@5": 0.02}, 0.05, {}, "")
+        gate = evaluate_gate(self._diff(15, 15, 10), cal)
+        assert gate.passed is True
+
+    def test_stable_regression_alongside_near_ties_still_fails(self):
+        # The stable-query signals must still work when near-ties are present.
+        from recallops.models import DiffResult, QueryDiff, QueryEval
+
+        def qe(hit5, target_rank):
+            return QueryEval("", [("c", 1.0)], ["d"], target_rank, {5: hit5},
+                             {"recall@5": 1.0 if hit5 else 0.0}, None)
+        queries = {}
+        for i in range(8):  # stable hard regressors -> stable McNemar fires
+            queries[f"r{i}"] = QueryDiff(f"r{i}", "regressed", "stable",
+                                         {"recall@5": -1.0}, qe(True, 1), qe(False, None))
+        for i in range(5):  # near-ties are just noise, excluded
+            queries[f"t{i}"] = QueryDiff(f"t{i}", "regressed", "unstable",
+                                         {"recall@5": -1.0}, qe(True, 5), qe(False, 6))
+        dr = DiffResult("d", "a", "b", "gold-v1", {}, False, {"recall@5": -0.5},
+                        queries, {}, False, True)
+        gate = evaluate_gate(dr, CalibrationRecord("a", 3, {"recall@5": 0.02}, 0.05, {}, ""))
+        assert gate.passed is False
+        assert gate.details["b"] == 8 and gate.details["n_unstable"] == 5
+
+    def test_details_report_sample_sizes(self):
+        cal = CalibrationRecord("a", 3, {"recall@5": 0.02}, 0.05, {}, "")
+        gate = evaluate_gate(self._diff(2, 1, 7), cal)
+        assert gate.details["n_stable"] == 7
+        assert gate.details["n_unstable"] == 3

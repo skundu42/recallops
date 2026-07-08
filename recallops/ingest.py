@@ -12,9 +12,10 @@ Provenance keys:
   stage identity (tool, version, params) for the same reason: the docs table
   is unique on ``(doc_id, source_path, parse_ph)`` and must keep one parsed
   text per parse configuration.
-- ``collection_name(manifest)`` derives the serving collection from the
-  embed + index stage dicts only, so retrieval-stage changes never force an
-  index rebuild.
+- ``collection_name(manifest)`` derives the serving collection from the corpus
+  merkle root plus the parse/chunk/embed/index stage dicts, so every distinct
+  chunk set gets its own collection while retrieval-stage changes never force
+  an index rebuild.
 
 Manifests are fully deterministic (``created_at`` is left empty) so identical
 inputs produce byte-identical manifests on any machine.
@@ -73,17 +74,19 @@ def chunkset_key(merkle: str, parse_stage: StageSpec, chunk_stage: StageSpec) ->
 
 
 def collection_name(manifest: SnapshotManifest, namespace: str = "") -> str:
-    # The served chunk set is fully determined by parse+chunk (which chunks
-    # exist) and embed (their vectors); index carries the serving params. Two
-    # snapshots that differ in any of these must occupy distinct collections so
-    # live-mode upserts never mix chunk sets from different pipelines.
+    # The served chunk set is fully determined by the corpus (merkle root),
+    # parse+chunk (which chunks exist) and embed (their vectors); index carries
+    # the serving params. Two snapshots that differ in any of these must occupy
+    # distinct collections so live-mode upserts never mix chunk sets — without
+    # the merkle root, re-ingesting an edited corpus under the same pipeline
+    # would keep serving chunks of deleted documents (upserts never delete).
     #
     # ``namespace`` (the project id) qualifies the name so that two DIFFERENT
     # projects sharing one vector DB with an identical pipeline never collide in
     # the same table. Empty namespace reproduces the un-namespaced name exactly,
     # so single-project and local-adapter deployments are unaffected.
     stages = [manifest.pipeline.stage(s) for s in ("parse", "chunk", "embed", "index")]
-    parts = ([namespace] if namespace else []) + [
+    parts = ([namespace] if namespace else []) + [manifest.corpus.merkle_root] + [
         hashing.canonical_json(s.to_dict() if s else None) for s in stages
     ]
     return "col_" + hashing.h(*parts)
@@ -196,7 +199,13 @@ def ingest(store: ProjectStore, source_dir: Path, pipeline: PipelineDAG,
         new_chunks, reused_chunks = 0, len(records)
     else:
         records = []
+        chunked: set[str] = set()
         for doc_id, text in parsed_docs:
+            # Byte-identical files share one content-addressed doc_id and would
+            # otherwise emit the same chunk records once per path.
+            if doc_id in chunked:
+                continue
+            chunked.add(doc_id)
             records.extend(chunkers.chunk_doc(
                 doc_id, text, chunk_stage.tool, chunk_stage.params,
                 parse_stage.id, chunk_stage.id,
@@ -228,7 +237,11 @@ def ingest(store: ProjectStore, source_dir: Path, pipeline: PipelineDAG,
         adapter.ensure_collection(collection, provider.dims)
         if records:
             found = store.get_embeddings(keys)
-            source_by_doc = {doc_id: rel for rel, doc_id in pairs}
+            # pairs is sorted by path; keep the first path as the canonical
+            # source for documents that exist at several byte-identical paths.
+            source_by_doc: dict[str, str] = {}
+            for rel, doc_id in pairs:
+                source_by_doc.setdefault(doc_id, rel)
             adapter.upsert(
                 collection,
                 [r.chunk_id for r in records],

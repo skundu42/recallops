@@ -97,7 +97,13 @@ def diff_summary_markdown(diffres: DiffResult,
     details = gate.details if gate is not None else {}
     primary = details.get("primary_metric", PRIMARY_METRIC)
     ci = details.get("ci")
-    lines.append("| Metric | Δ | 95% CI |")
+    # Δ is the aggregate over ALL queries (diffres.metric_deltas); the CI is the
+    # gate's bootstrap over STABLE queries only (near-ties excluded, fix 4).
+    # Label the CI column so a reader never pairs the two as one population.
+    n_stable = details.get("n_stable")
+    n_unstable = details.get("n_unstable")
+    ci_header = "95% CI (stable queries)" if ci is not None else "95% CI"
+    lines.append(f"| Metric | Δ (all) | {ci_header} |")
     lines.append("|---|---|---|")
     for metric in sorted(diffres.metric_deltas):
         delta = diffres.metric_deltas[metric]
@@ -106,6 +112,12 @@ def diff_summary_markdown(diffres: DiffResult,
             ci_txt = f"[{ci[0]:+.4f}, {ci[1]:+.4f}]"
         lines.append(f"| {metric} | {delta:+.4f} | {ci_txt} |")
     lines.append("")
+    if ci is not None and n_stable is not None:
+        note = f"CI over {n_stable} stable queries"
+        if n_unstable:
+            note += f" ({n_unstable} near-tie excluded from the CI)"
+        lines.append(f"_{note}._")
+        lines.append("")
 
     causes = _collect_causes(attributions)
     if causes:

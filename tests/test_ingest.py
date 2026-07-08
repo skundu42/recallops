@@ -176,6 +176,47 @@ def test_collection_name_tracks_embed_and_index_factors(store: ProjectStore, sma
     )
 
 
+def test_collection_name_tracks_corpus_identity(store: ProjectStore, small_corpus: Path):
+    # Two corpus versions under the same pipeline must occupy distinct
+    # collections; sharing one lets stale chunks from the old corpus keep
+    # serving after a re-ingest (upserts never delete).
+    pipeline = build_pipeline(CONFIG)
+    first = ingest(store, small_corpus, pipeline, adapter=None)
+    (small_corpus / "beta.md").write_text("# Beta Gateway\n\nRewritten from scratch.\n")
+    second = ingest(store, small_corpus, pipeline, adapter=None)
+    assert second.manifest.corpus.merkle_root != first.manifest.corpus.merkle_root
+    assert collection_name(first.manifest) != collection_name(second.manifest)
+
+
+def test_live_collection_no_stale_chunks_after_corpus_edit(
+        tmp_path: Path, store: ProjectStore, small_corpus: Path):
+    adapter = LocalIndexAdapter(tmp_path / "index")
+    pipeline = build_pipeline(CONFIG)
+    ingest(store, small_corpus, pipeline, adapter=adapter)
+    (small_corpus / "gamma.md").unlink()
+    report = ingest(store, small_corpus, pipeline, adapter=adapter)
+    col = collection_name(report.manifest)
+    assert adapter.count(col) == report.manifest.corpus.chunk_count
+
+
+def test_duplicate_content_files_chunked_once(tmp_path: Path, store: ProjectStore,
+                                              small_corpus: Path):
+    # Byte-identical files share one doc_id; the chunkset must hold each unique
+    # chunk once and chunk_count must match what the adapter serves.
+    (small_corpus / "zeta.md").write_text((small_corpus / "alpha.md").read_text())
+    adapter = LocalIndexAdapter(tmp_path / "index")
+    pipeline = build_pipeline(CONFIG)
+    report = ingest(store, small_corpus, pipeline, adapter=adapter)
+
+    assert report.manifest.corpus.doc_count == 4
+    key = chunkset_key(report.manifest.corpus.merkle_root,
+                       pipeline.stage("parse"), pipeline.stage("chunk"))
+    ids = [r.chunk_id for r in store.get_chunks(key)]
+    assert len(ids) == len(set(ids))
+    assert report.manifest.corpus.chunk_count == len(ids)
+    assert adapter.count(collection_name(report.manifest)) == report.manifest.corpus.chunk_count
+
+
 def test_collection_name_namespace_isolates_projects(store: ProjectStore, small_corpus: Path):
     # Finding: two DIFFERENT projects sharing one vector DB with an identical
     # pipeline must get DIFFERENT collections (else their chunks collide in one

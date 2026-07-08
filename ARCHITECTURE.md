@@ -87,9 +87,12 @@ Two derived keys tie the DAG together:
 - **`chunkset_key`** = `h(merkle_root, parse_tool, parse_params_hash,
   chunk_tool, chunk_params_hash)`: the identity of a set of chunks. Identical
   corpus + parse + chunk config always resolves to the same stored chunk set.
-- **`collection_name`** = `col_` + hash of the (optional project namespace and
-  the) `parse`, `chunk`, `embed`, `index` stage dicts: the serving-index
-  identity. Retrieve-stage changes therefore never force an index rebuild, and
+- **`collection_name`** = `col_` + hash of the (optional project namespace, the)
+  corpus `merkle_root`, and the `parse`, `chunk`, `embed`, `index` stage dicts:
+  the serving-index identity. Including the merkle root means every distinct
+  chunk set gets its own collection, so re-ingesting an edited corpus under the
+  same pipeline can never keep serving chunks of deleted documents (upserts do
+  not delete). Retrieve-stage changes still never force an index rebuild, and
   two projects sharing one vector DB never collide (the namespace is stored in
   the project meta, not in any content hash).
 
@@ -259,14 +262,17 @@ per-query classification in [`diffing.py`](recallops/diffing.py):
   unchanged` by the primary-metric delta, and marks it **`unstable`** (a
   near-tie) when the after-run score gap is below `epsilon`.
 - **`evaluate_gate` (statistical mode)** combines three signals: a bootstrap 95%
-  CI on the per-query primary-metric deltas (fail if the upper bound < 0),
+  CI on the **stable-query** primary-metric deltas (fail if the upper bound < 0),
   **McNemar's exact test** on stable-query hit flips, and **per-tag McNemar**
   corrected with **Benjamini-Hochberg FDR**. The overall McNemar is judged on
   its own `q`; BH corrects only the per-tag subgroup family (so finer tagging
   never makes a global regression harder to detect).
 
-**Near-tie (`unstable`) queries are excluded from every flip count**, so pure
-serving noise can never turn a gate red, the never-flaky invariant. A `raw`
+**Near-tie (`unstable`) queries are excluded from every red signal** — the CI
+and both flip counts — so pure serving noise can never turn a gate red, the
+never-flaky invariant. The cost is that a regression small enough to show up
+only as near-ties sits below the calibrated noise floor and is not flagged; the
+excluded count is surfaced in the gate details so a reviewer can see it. A `raw`
 `--fail-if` threshold exists only as an escape hatch; the docs steer callers to
 the statistical gate.
 

@@ -161,9 +161,15 @@ def _arm_records(store: ProjectStore, pipeline: PipelineDAG, merkle: str):
     if store.has_chunkset(key):
         return store.get_chunks(key)
     records = []
+    chunked: set[str] = set()
     for doc in store.docs_for_merkle(merkle):
         parsed = parsers.parse(doc["source_path"], doc["raw"], tool=parse_stage.tool)
         store.put_doc(doc["source_path"], doc["raw"], parsed.text, parse_ph(parse_stage))
+        # Byte-identical files share one doc_id; chunk each document once so
+        # arm chunksets match managed ingest's content under the same key.
+        if doc["doc_id"] in chunked:
+            continue
+        chunked.add(doc["doc_id"])
         records.extend(chunkers.chunk_doc(
             doc["doc_id"], parsed.text, chunk_stage.tool, chunk_stage.params,
             parse_stage.id, chunk_stage.id,

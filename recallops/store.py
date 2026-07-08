@@ -488,7 +488,8 @@ class ProjectStore:
         rows = self._conn.execute(
             "SELECT snapshot_id, manifest_json FROM snapshots ORDER BY seq"
         ).fetchall()
-        kept_ids = {r["snapshot_id"] for r in rows[len(rows) - keep_last:]} if keep_last > 0 else set()
+        start = max(0, len(rows) - keep_last)
+        kept_ids = {r["snapshot_id"] for r in rows[start:]} if keep_last > 0 else set()
         kept_ids |= {r["snapshot_id"] for r in rows if r["snapshot_id"] in pinned}
         removed_rows = [r for r in rows if r["snapshot_id"] not in kept_ids]
 
@@ -501,40 +502,47 @@ class ProjectStore:
         kept_uris = artifact_uris(r for r in rows if r["snapshot_id"] in kept_ids)
         victims = artifact_uris(removed_rows) - kept_uris
 
-        removed_chunksets = 0
-        removed_emb_files = 0
-        for uri in sorted(victims):
-            if uri.startswith("artifacts/chunks/"):
-                path = self._path(uri)
-                if path.exists():
-                    path.unlink()
-                    removed_chunksets += 1
-                with self._conn:
-                    self._conn.execute("DELETE FROM chunksets WHERE uri = ?", (uri,))
-            elif uri.startswith("artifacts/emb/"):
-                removed_emb_files += self._remove_emb_uri(uri)
+        chunk_uris = sorted(u for u in victims if u.startswith("artifacts/chunks/"))
+        emb_uris = sorted(u for u in victims if u.startswith("artifacts/emb/"))
+        emb_part_uris = [p for uri in emb_uris for p in self._emb_part_uris(uri)]
 
+        # Index rows go first, in one transaction: interrupted mid-gc, the
+        # worst case is an orphan artifact file. The reverse order leaves rows
+        # for deleted files — a snapshot listed without its artifacts, or an
+        # embeddings row whose missing parquet makes later ingests skip
+        # re-embedding and commit vector-less snapshots.
         with self._conn:
             self._conn.executemany(
                 "DELETE FROM snapshots WHERE snapshot_id = ?",
                 [(r["snapshot_id"],) for r in removed_rows],
             )
-        return {"removed_chunksets": removed_chunksets, "removed_emb_files": removed_emb_files}
+            self._conn.executemany(
+                "DELETE FROM chunksets WHERE uri = ?", [(u,) for u in chunk_uris]
+            )
+            self._conn.executemany(
+                "DELETE FROM embeddings WHERE part_uri = ?", [(u,) for u in emb_part_uris]
+            )
 
-    def _remove_emb_uri(self, uri: str) -> int:
-        path = self._path(uri)
-        removed = 0
-        if path.is_dir():
-            part_uris = [f"{uri}/{p.name}" for p in sorted(path.glob("*.parquet"))]
-        else:
-            part_uris = [uri] if path.exists() else []
-        for part_uri in part_uris:
+        removed_chunksets = 0
+        for uri in chunk_uris:
+            path = self._path(uri)
+            if path.exists():
+                path.unlink()
+                removed_chunksets += 1
+        removed_emb_files = 0
+        for part_uri in emb_part_uris:
             part_path = self._path(part_uri)
             if part_path.exists():
                 part_path.unlink()
-                removed += 1
-            with self._conn:
-                self._conn.execute("DELETE FROM embeddings WHERE part_uri = ?", (part_uri,))
-        if path.is_dir() and not any(path.iterdir()):
-            path.rmdir()
-        return removed
+                removed_emb_files += 1
+        for uri in emb_uris:
+            path = self._path(uri)
+            if path.is_dir() and not any(path.iterdir()):
+                path.rmdir()
+        return {"removed_chunksets": removed_chunksets, "removed_emb_files": removed_emb_files}
+
+    def _emb_part_uris(self, uri: str) -> list[str]:
+        path = self._path(uri)
+        if path.is_dir():
+            return [f"{uri}/{p.name}" for p in sorted(path.glob("*.parquet"))]
+        return [uri] if path.exists() else []

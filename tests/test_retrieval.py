@@ -295,3 +295,14 @@ def test_bm25_built_once_per_engine(tmp_project: Path, small_corpus: Path,
 
 def test_collection_name_reexported_from_ingest() -> None:
     assert collection_name is ingest_mod.collection_name
+
+
+def test_managed_unknown_reranker_surfaces_real_error(tmp_path, small_corpus):
+    # A managed snapshot (no retrieval log) with a typo'd rerank tool must get
+    # the real "unknown reranker" error, not a misleading SDK log-replay hint.
+    store = ProjectStore(tmp_path / "proj")
+    pipeline = build_pipeline({"rerank": {"tool": "recall.rerankers.overlp", "top_n": 5}})
+    manifest = ingest(store, small_corpus, pipeline, adapter=None).manifest
+    engine = RetrievalEngine(store, manifest)
+    with pytest.raises(ValueError, match="unknown reranker"):
+        engine.run_query("q1", "how do I bootstrap the alpha widget")

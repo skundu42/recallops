@@ -165,8 +165,12 @@ def _run_change(store: ProjectStore, source_dir: Path, base: SnapshotManifest,
         for q in regressed
     }
     arms = build_arms(enumerate_factors(dr))
+    # Content-address the checkpoint with the diff id (hashes both snapshot ids
+    # and the dataset id): arm_ids hash only the factor assignment, so a key of
+    # the change name alone would resume arm evals recorded for a previous
+    # corpus/config and judge this diff against stale data.
     arm_results = run_arms(store, arms, base, man_b, source_dir, dataset,
-                           checkpoint_key=f"phase0:{change.name}")
+                           checkpoint_key=f"phase0:{change.name}:{dr.diff_id}")
     reports = confirm_causes(dr, dataset, arm_results, arms, funnels, dr.alignment,
                              recovery_threshold="rank1", top_k=TOP_K)
     chunk_texts = engine_b.chunk_texts()

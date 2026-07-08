@@ -464,3 +464,53 @@ def test_gc_shared_artifact_kept(store: ProjectStore):
     with pytest.raises(KeyError):
         store.get_snapshot(m1.snapshot_id)
     assert store.get_snapshot(m2.snapshot_id).to_json() == m2.to_json()
+
+
+def _gc_snapshots(store: ProjectStore, models: tuple[str, ...]) -> list[SnapshotManifest]:
+    snaps = []
+    for i, model in enumerate(models):
+        records = make_chunks(f"doc_{i:016d}", [f"chunk for {model}"])
+        uri = store.put_chunks(f"cs_{model}", records)
+        store.put_embeddings(model, _emb_batch(model, 2, seed=10 + i))
+        manifest = make_manifest(
+            chunk_params={"max_tokens": 60 + i, "overlap": 0},
+            artifacts={"chunks": uri, "embeddings": f"artifacts/emb/{model}"},
+        )
+        snaps.append(store.commit_snapshot(manifest))
+    return snaps
+
+
+def test_gc_keep_last_exceeding_count_removes_nothing(store: ProjectStore):
+    # keep_last > snapshot count (the CLI default --keep 5 on a young project)
+    # must prune nothing; a negative slice start would wrap and delete the
+    # oldest snapshots instead.
+    snaps = _gc_snapshots(store, ("m1", "m2", "m3"))
+
+    result = store.gc(keep_last=5)
+
+    assert result == {"removed_chunksets": 0, "removed_emb_files": 0}
+    assert [s.snapshot_id for s in store.list_snapshots()] == [s.snapshot_id for s in snaps]
+    for model in ("m1", "m2", "m3"):
+        assert store.has_chunkset(f"cs_{model}")
+        keys = list(_emb_batch(model, 2, seed=10 + ("m1", "m2", "m3").index(model)))
+        assert store.missing_embedding_keys(keys) == []
+
+
+def test_gc_deletes_index_rows_before_files(store: ProjectStore, monkeypatch):
+    # A crash while unlinking artifact files must leave at worst an orphan
+    # file, never an index row for a deleted file: an embeddings row without
+    # its parquet makes every later ingest skip re-embedding those keys and
+    # commit vector-less snapshots.
+    _gc_snapshots(store, ("m1", "m2"))
+    m1_keys = list(_emb_batch("m1", 2, seed=10))
+
+    def boom(self):
+        raise OSError("simulated crash during unlink")
+
+    monkeypatch.setattr(Path, "unlink", boom)
+    with pytest.raises(OSError):
+        store.gc(keep_last=1)
+
+    assert store.missing_embedding_keys(m1_keys) == m1_keys
+    assert not store.has_chunkset("cs_m1")
+    assert [s.artifacts["embeddings"] for s in store.list_snapshots()] == ["artifacts/emb/m2"]

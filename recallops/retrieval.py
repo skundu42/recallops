@@ -20,7 +20,9 @@ compare a live (possibly approximate) dense ranking against ground truth.
 Candidate depth: dense and sparse each retrieve ``max(top_k * 4, 20)``
 candidates before fusion; the final list truncates to ``top_k`` (or the rerank
 stage's ``top_n``). When a rerank stage is present it reorders the fused top
-``top_k`` candidates and its output becomes ``final``. Sparse candidates are
+``top_k`` candidates and its output becomes ``final``; a bespoke rerank stage
+(recorded via the SDK, no built-in implementation) replays the candidates the
+Recorder logged under ``retrieval_log`` instead. Sparse candidates are
 computed even without a hybrid block so funnel attribution always has every
 stage; ``fused`` is dense-order in that case.
 """
@@ -72,6 +74,7 @@ class RetrievalEngine:
         self._bm25: BM25Index | None = None
         self._dense_index: tuple[list[str], np.ndarray] | None = None
         self._doc_map: dict[str, str] | None = None
+        self._doc_paths: dict[str, tuple[str, ...]] | None = None
 
     def chunks(self) -> list[ChunkRecord]:
         if self._chunks is None:
@@ -82,15 +85,26 @@ class RetrievalEngine:
     def chunk_texts(self) -> dict[str, str]:
         return {r.chunk_id: r.text for r in self.chunks()}
 
-    def chunk_doc_map(self) -> dict[str, str]:
-        if self._doc_map is None:
+    def chunk_doc_paths(self) -> dict[str, tuple[str, ...]]:
+        """Every source path of each chunk's document, sorted. Byte-identical
+        files share one content-addressed doc_id, so a chunk can belong to
+        several paths and scoring must accept any of them."""
+        if self._doc_paths is None:
             docs = self.store.docs_for_merkle(self.manifest.corpus.merkle_root)
-            by_doc = {d["doc_id"]: d["source_path"] for d in docs}
-            self._doc_map = {
-                r.chunk_id: by_doc[r.doc_id] if r.doc_id in by_doc
-                else self.store.get_doc(r.doc_id)["source_path"]
+            by_doc: dict[str, list[str]] = {}
+            for d in docs:
+                by_doc.setdefault(d["doc_id"], []).append(d["source_path"])
+            self._doc_paths = {
+                r.chunk_id: tuple(sorted(by_doc[r.doc_id])) if r.doc_id in by_doc
+                else (self.store.get_doc(r.doc_id)["source_path"],)
                 for r in self.chunks()
             }
+        return self._doc_paths
+
+    def chunk_doc_map(self) -> dict[str, str]:
+        """Canonical (first-sorted) source path per chunk."""
+        if self._doc_map is None:
+            self._doc_map = {cid: paths[0] for cid, paths in self.chunk_doc_paths().items()}
         return self._doc_map
 
     @property
@@ -138,11 +152,29 @@ class RetrievalEngine:
 
         rerank_stage = self.manifest.pipeline.stage("rerank")
         if rerank_stage is not None:
-            reranker = get_reranker(rerank_stage.tool, dict(rerank_stage.params))
-            texts = self.chunk_texts()
-            candidates = [(cid, texts[cid]) for cid, _ in fused[:top_k]]
-            reranked = reranker(question, candidates)
             top_n = int(rerank_stage.params.get("top_n", top_k))
+            try:
+                reranker = get_reranker(rerank_stage.tool, dict(rerank_stage.params))
+            except ValueError as unknown_tool:
+                # No built-in implementation for this tool. A bespoke SDK snapshot
+                # replays the candidates the Recorder logged (FR-2.2); otherwise
+                # the message covers both likely causes since a managed typo and
+                # an SDK snapshot that forgot to log are not reliably
+                # distinguishable from the manifest alone.
+                logged = self._logged_run(query_id)
+                reranked = logged.stages.reranked or logged.final if logged else None
+                if not reranked:
+                    raise ValueError(
+                        f"rerank stage tool {rerank_stage.tool!r} has no built-in "
+                        f"implementation ({unknown_tool}). For a managed pipeline check "
+                        "the tool name; for an SDK-recorded snapshot record candidates "
+                        f"with Recorder.log_retrieval(query_id, 'rerank', candidates) — "
+                        f"none were logged for query {query_id!r}."
+                    ) from unknown_tool
+            else:
+                texts = self.chunk_texts()
+                candidates = [(cid, texts[cid]) for cid, _ in fused[:top_k]]
+                reranked = reranker(question, candidates)
             final = list(reranked[:top_n])
         else:
             reranked = None
@@ -155,6 +187,11 @@ class RetrievalEngine:
                                    fused=list(fused), reranked=reranked),
             final=final,
         )
+
+    def _logged_run(self, query_id: str) -> QueryRun | None:
+        """The Recorder's flushed retrieval log for this snapshot + query."""
+        d = self.store.get_json("retrieval_log", f"{self.manifest.snapshot_id}:{query_id}")
+        return QueryRun.from_dict(d) if d else None
 
     def _dense_candidates(self, question: str, depth: int) -> list[tuple[str, float]]:
         if self.adapter is None:

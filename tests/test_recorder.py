@@ -188,3 +188,153 @@ def test_log_embeddings_unknown_chunk_raises(tmp_path: Path):
     with pytest.raises(KeyError):
         rec.log_embeddings(provider="local", model="hash-v1",
                            chunk_ids=["ch_missing"], vectors=np.zeros((1, 8), dtype=np.float32))
+
+
+def test_log_embeddings_conflicting_model_raises(tmp_path: Path, small_corpus: Path):
+    # A second log_embeddings under a different model must raise: silently
+    # keying the new vectors under the FIRST stage drops them (the old keys
+    # already exist in the store, so put_embeddings writes nothing).
+    rec = Recorder(project="sdk", store=tmp_path / "sdk")
+    chunk_ids = _record_corpus(rec, small_corpus)
+    n = len(chunk_ids)
+    rec.log_embeddings(provider="local", model="hash-v1", chunk_ids=chunk_ids,
+                       vectors=np.full((n, 16), 0.5, dtype=np.float32), dims=16)
+    with pytest.raises(ValueError, match="embed"):
+        rec.log_embeddings(provider="local", model="hash-v2", chunk_ids=chunk_ids,
+                           vectors=np.full((n, 16), 0.25, dtype=np.float32), dims=16)
+
+
+def test_log_embeddings_same_spec_in_batches_ok(tmp_path: Path, small_corpus: Path):
+    rec = Recorder(project="sdk", store=tmp_path / "sdk")
+    chunk_ids = _record_corpus(rec, small_corpus)
+    n = len(chunk_ids)
+    vectors = np.full((n, 16), 0.5, dtype=np.float32)
+    split = n // 2
+    rec.log_embeddings(provider="local", model="hash-v1", chunk_ids=chunk_ids[:split],
+                       vectors=vectors[:split], dims=16)
+    rec.log_embeddings(provider="local", model="hash-v1", chunk_ids=chunk_ids[split:],
+                       vectors=vectors[split:], dims=16)
+    snapshot_id = rec.commit()
+    assert rec.store.get_snapshot(snapshot_id).artifacts["embeddings_uri"]
+
+
+def test_declared_embed_stage_without_model_gives_clear_error(tmp_path: Path,
+                                                              small_corpus: Path):
+    rec = Recorder(project="sdk", store=tmp_path / "sdk")
+    chunk_ids = _record_corpus(rec, small_corpus)
+    with rec.stage("embed", tool="local", params={"dims": 16}):
+        pass
+    with pytest.raises(ValueError, match="model"):
+        rec.log_embeddings(provider="local", model="hash-v1", chunk_ids=chunk_ids,
+                           vectors=np.ones((len(chunk_ids), 16), dtype=np.float32), dims=16)
+
+
+def _sdk_rerank_snapshot(tmp_path: Path, small_corpus: Path, log_rerank: bool):
+    rec = Recorder(project="sdk", store=tmp_path / "sdk")
+    chunk_ids = _record_corpus(rec, small_corpus)
+    provider = LocalHashProvider(dims=64, seed=0)
+    texts = [r.text for r in rec.logged_chunks()]
+    rec.log_embeddings(provider="local", model="hash-v1", chunk_ids=chunk_ids,
+                       vectors=provider.embed(texts), dims=64, params=provider.params)
+    with rec.stage("rerank", tool="acme.cross-encoder", version="3", params={"top_n": 2}):
+        pass
+    target = next(r.chunk_id for r in rec.logged_chunks() if "thirty seconds" in r.text)
+    other = next(r.chunk_id for r in rec.logged_chunks() if r.chunk_id != target)
+    if log_rerank:
+        rec.log_retrieval("q1", "rerank", [(target, 0.99), (other, 0.5)])
+    snapshot_id = rec.commit()
+    return rec.store, rec.store.get_snapshot(snapshot_id), target
+
+
+def test_sdk_bespoke_rerank_replayed_from_log(tmp_path: Path, small_corpus: Path):
+    # A bespoke rerank stage has no local implementation; replay must serve the
+    # candidates the Recorder logged (FR-2.2) instead of crashing every eval.
+    from recallops.evalrunner import evaluate
+    from recallops.models import GoldenCase, GoldenDataset
+
+    store, manifest, target = _sdk_rerank_snapshot(tmp_path, small_corpus, log_rerank=True)
+    dataset = GoldenDataset("gold-v1", [
+        GoldenCase("q1", "what is the default gateway timeout", ["beta.md"])])
+    result = evaluate(store, manifest, dataset)
+    qe = result.per_query["q1"]
+    assert qe.ranked_chunks[0][0] == target
+    assert qe.run.stages.reranked[0][0] == target
+    assert qe.metrics["recall@5"] == 1.0
+
+
+def test_sdk_bespoke_rerank_without_log_raises_clearly(tmp_path: Path, small_corpus: Path):
+    from recallops.evalrunner import evaluate
+    from recallops.models import GoldenCase, GoldenDataset
+
+    store, manifest, _ = _sdk_rerank_snapshot(tmp_path, small_corpus, log_rerank=False)
+    dataset = GoldenDataset("gold-v1", [
+        GoldenCase("q1", "what is the default gateway timeout", ["beta.md"])])
+    with pytest.raises(ValueError, match="log_retrieval"):
+        evaluate(store, manifest, dataset)
+
+
+def test_recorder_dedupes_duplicate_content_docs(tmp_path: Path):
+    # Byte-identical files share one doc_id; log_chunks per file must not
+    # append duplicate chunk records (managed ingest chunks each doc once, and
+    # both write under the same content-addressed chunkset key).
+    from recallops.ingest import chunkset_key
+    rec = Recorder(project="sdk", store=tmp_path / "sdk")
+    text = "refund policy applies to all orders"
+    with rec.stage("parse", tool="text-v1", version="1"):
+        d1 = rec.log_document("a.md", text.encode(), text)
+        d2 = rec.log_document("b.md", text.encode(), text)
+    assert d1 == d2
+    with rec.stage("chunk", tool="recall.chunkers.fixed_token", version="1",
+                   params={"max_tokens": 800, "overlap": 0}) as chunk_stage:
+        rec.log_chunks(d1, [{"text": text, "span": (0, len(text))}])
+        rec.log_chunks(d2, [{"text": text, "span": (0, len(text))}])
+    ids = [c.chunk_id for c in rec.logged_chunks()]
+    assert len(ids) == len(set(ids)) == 1
+    snapshot_id = rec.commit()
+    manifest = rec.store.get_snapshot(snapshot_id)
+    assert manifest.corpus.chunk_count == 1
+    key = chunkset_key(manifest.corpus.merkle_root,
+                       rec.store.get_snapshot(snapshot_id).pipeline.stage("parse"), chunk_stage)
+    assert len(rec.store.get_chunks(key)) == 1
+
+
+def test_log_embeddings_declared_stage_nondefault_params_ok(tmp_path: Path, small_corpus: Path):
+    # A user who declares the embed stage with non-default params and then calls
+    # log_embeddings without repeating them must NOT be rejected: vectors are
+    # keyed under the declared stage that lands in the manifest.
+    rec = Recorder(project="sdk", store=tmp_path / "sdk")
+    chunk_ids = _record_corpus(rec, small_corpus)
+    with rec.stage("embed", tool="local", version="1",
+                   params={"provider": "local", "model": "hash-v1", "dims": 8,
+                           "seed": 7, "ngram": [1, 2]}):
+        pass
+    rec.log_embeddings(provider="local", model="hash-v1", chunk_ids=chunk_ids,
+                       vectors=np.ones((len(chunk_ids), 8), dtype=np.float32), dims=8)
+    snapshot_id = rec.commit()
+    assert rec.store.get_snapshot(snapshot_id).artifacts["embeddings_uri"]
+
+
+def test_log_embeddings_declared_stage_genuine_conflict_raises(tmp_path: Path, small_corpus: Path):
+    rec = Recorder(project="sdk", store=tmp_path / "sdk")
+    chunk_ids = _record_corpus(rec, small_corpus)
+    with rec.stage("embed", tool="local", version="1",
+                   params={"provider": "local", "model": "hash-v1", "dims": 8,
+                           "seed": 7, "ngram": [1, 2]}):
+        pass
+    with pytest.raises(ValueError, match="conflict"):
+        rec.log_embeddings(provider="local", model="hash-v2", chunk_ids=chunk_ids,
+                           vectors=np.ones((len(chunk_ids), 8), dtype=np.float32), dims=8)
+
+
+def test_log_embeddings_param_change_same_model_raises(tmp_path: Path, small_corpus: Path):
+    # Same model but a changed param (seed) between two calls must raise, not
+    # silently drop the second call's vectors under the first stage's keys.
+    rec = Recorder(project="sdk", store=tmp_path / "sdk")
+    chunk_ids = _record_corpus(rec, small_corpus)
+    n = len(chunk_ids)
+    rec.log_embeddings(provider="local", model="hash-v1", chunk_ids=chunk_ids,
+                       vectors=np.full((n, 8), 0.5, dtype=np.float32), dims=8)
+    with pytest.raises(ValueError, match="conflict"):
+        rec.log_embeddings(provider="local", model="hash-v1", chunk_ids=chunk_ids,
+                           vectors=np.full((n, 8), 0.25, dtype=np.float32), dims=8,
+                           params={"seed": 5})

@@ -178,6 +178,8 @@ def _gate() -> GateResult:
             "b": 1,
             "c": 0,
             "p_overall": 0.5,
+            "n_stable": 2,
+            "n_unstable": 1,
         },
     )
 
@@ -196,6 +198,15 @@ def test_diff_summary_markdown_has_ci_numbers_and_details_folds():
     assert "Calibration: present" in md
     assert "1 regressed" in md
     assert "chunker" in md  # top verified cause
+
+
+def test_diff_summary_ci_column_labeled_stable_only():
+    # Fix 4 makes the CI stable-only while the Δ column is over ALL queries.
+    # The table must say so, or a reader pairs an all-query Δ with a
+    # stable-only CI and reads a self-contradictory row.
+    md = diff_summary_markdown(_diffres(), _attributions(), _gate(), calibration_ok=True)
+    header = next(line for line in md.splitlines() if "95% CI" in line and "|" in line)
+    assert "stable" in header.lower()
 
 
 def test_diff_summary_markdown_without_gate_reports_calibration_absent():

@@ -8,13 +8,17 @@ gap fluctuate under pure serving noise (FR-9.2). The near-tie threshold
 
 ``evaluate_gate`` turns a snapshot diff into a pass/fail decision. Statistical
 mode (the default, FR-9.4) requires a calibration record and combines three
-signals: a bootstrap CI on the aggregate primary-metric delta, a McNemar test
-on stable-query hit flips, and per-tag McNemar tests corrected with
+signals: a bootstrap CI on the stable-query primary-metric delta, a McNemar
+test on stable-query hit flips, and per-tag McNemar tests corrected with
 Benjamini-Hochberg FDR. Near-tie (``unstable``) queries are excluded from every
-flip count, so pure serving noise can never turn a gate red, the FR-9
-acceptance invariant. Raw mode applies a single ``metric op threshold``
-condition to snapshot B's aggregate and is offered only as an escape hatch;
-docs steer callers to statistical mode.
+red signal — the CI and both flip counts alike — so pure serving noise can
+never turn a gate red, the FR-9 never-flaky invariant (risk R1). The cost of
+that guarantee is that a regression small enough to appear only as near-ties is
+below the calibrated noise floor and deliberately not flagged; the near-tie
+count is surfaced in the result details so a reviewer can see how much was
+excluded. Raw mode applies a single ``metric op threshold`` condition to
+snapshot B's aggregate and is offered only as an escape hatch; docs steer
+callers to statistical mode.
 """
 from __future__ import annotations
 
@@ -22,17 +26,15 @@ import math
 import re
 
 from .adapters.base import VectorAdapter
-from .evalrunner import hit_rate_at_k, mrr, ndcg_at_k, recall_at_k
+from .evalrunner import _case_eval
 from .ingest import collection_name
 from .models import (
     CalibrationRecord,
     DiffResult,
     GateResult,
-    GoldenCase,
     GoldenDataset,
     QueryDiff,
     QueryEval,
-    QueryRun,
     SnapshotManifest,
 )
 from .retrieval import RetrievalEngine
@@ -81,37 +83,6 @@ def _population_std(values: list[float]) -> float:
     return math.sqrt(math.fsum((v - mean) ** 2 for v in values) / n)
 
 
-def _query_eval(case: GoldenCase, run: QueryRun, doc_map: dict[str, str],
-                k_values: tuple[int, ...]) -> QueryEval:
-    ranked_docs: list[str] = []
-    seen: set[str] = set()
-    for cid, _ in run.final:
-        doc = doc_map.get(cid)
-        if doc is not None and doc not in seen:
-            seen.add(doc)
-            ranked_docs.append(doc)
-    want = set(case.expected_sources)
-    target_rank = next(
-        (rank for rank, (cid, _) in enumerate(run.final, start=1) if doc_map.get(cid) in want),
-        None,
-    )
-    metrics: dict[str, float] = {}
-    for k in k_values:
-        metrics[f"recall@{k}"] = recall_at_k(ranked_docs, case.expected_sources, k)
-        metrics[f"hit_rate@{k}"] = hit_rate_at_k(ranked_docs, case.expected_sources, k)
-        metrics[f"ndcg@{k}"] = ndcg_at_k(ranked_docs, case.expected_sources, k)
-    metrics["mrr"] = mrr(ranked_docs, case.expected_sources)
-    return QueryEval(
-        query_id=case.id,
-        ranked_chunks=list(run.final),
-        ranked_docs=ranked_docs,
-        target_rank=target_rank,
-        hit_at={k: metrics[f"hit_rate@{k}"] == 1.0 for k in k_values},
-        metrics=metrics,
-        run=run,
-    )
-
-
 def _target_gap(qe: QueryEval, k: int) -> float | None:
     """Signed target-vs-kth score gap, or None when there is no k-th anchor."""
     scores = [score for _, score in qe.ranked_chunks]
@@ -154,11 +125,11 @@ def calibrate(store: ProjectStore, manifest: SnapshotManifest, dataset: GoldenDa
         if supports_rebuild:
             adapter.rebuild(collection, seed=seed + i)
         engine = RetrievalEngine(store, manifest, adapter=adapter)
-        doc_map = engine.chunk_doc_map()
+        doc_map = engine.chunk_doc_paths()
         per_query: dict[str, QueryEval] = {}
         for case in cases:
             run = engine.run_query(case.id, case.question)
-            per_query[case.id] = _query_eval(case, run, doc_map, k_values)
+            per_query[case.id] = _case_eval(case, run, doc_map, k_values)
         runs.append(per_query)
 
     n_cases = len(cases)
@@ -273,13 +244,13 @@ def evaluate_gate(diffres: DiffResult, calibration: CalibrationRecord | None,
     """Decide whether a diff passes the release gate (FR-9.4).
 
     Statistical mode (requires ``calibration``): a bootstrap 95% CI on the
-    per-query primary-metric deltas flags a significant aggregate regression
-    when its upper bound is below 0; McNemar's exact test on stable-query hit
-    flips (near-ties excluded) plus per-tag McNemar tests corrected with
-    Benjamini-Hochberg FDR flag a significant one-way flip excess. The gate
-    fails on either signal. Raw mode (selected by ``mode="raw"`` or by passing
-    ``fail_if``) applies a single threshold to snapshot B's aggregate and needs
-    no calibration.
+    stable queries' primary-metric deltas (near-ties excluded) flags a
+    significant regression when its upper bound is below 0; McNemar's exact test
+    on stable-query hit flips plus per-tag McNemar tests corrected with
+    Benjamini-Hochberg FDR flag a one-way flip excess. The gate fails on either
+    signal. Near-ties feed neither, so serving noise never reddens the gate.
+    Raw mode (selected by ``mode="raw"`` or by passing ``fail_if``) applies a
+    single threshold to snapshot B's aggregate and needs no calibration.
 
     ``dataset`` is optional; when supplied, its per-case tags drive the per-tag
     McNemar/FDR pass (a documented extension of the plan signature).
@@ -294,14 +265,21 @@ def evaluate_gate(diffres: DiffResult, calibration: CalibrationRecord | None,
         )
 
     k = _metric_k(primary_metric)
-    qdiffs = list(diffres.queries.values())
+    unstable_ids = _unstable_ids(diffres)
+    stable = [qd for qd in diffres.queries.values() if qd.stability == "stable"]
+    unstable = [qd for qd in diffres.queries.values() if qd.stability == "unstable"]
 
-    deltas = [_primary_delta(qd, primary_metric) for qd in qdiffs]
+    # Near-tie (unstable) queries are quarantined from EVERY red signal — the CI
+    # and both flip counts alike. A single near-tie flip carries a full ±1.0
+    # metric delta yet is, by calibration, within serving noise; letting it feed
+    # any signal (even a directional one) gives pure noise a nonzero chance to
+    # redden the gate. Never-flaky (FR-9, risk R1) is paramount, so a systematic
+    # sub-epsilon regression that manifests only as near-ties is deliberately not
+    # caught here — it is below the calibrated noise floor by definition. The
+    # near-tie count is surfaced in ``details`` for visibility instead.
+    deltas = [_primary_delta(qd, primary_metric) for qd in stable]
     ci = bootstrap_ci(deltas, seed=seed)
     significant_regression = ci[1] < 0.0
-
-    unstable_ids = _unstable_ids(diffres)
-    stable = [qd for qd in qdiffs if qd.stability == "stable"]
 
     b, c = _flip_counts(stable, k)
     p_overall = mcnemar_exact_p(b, c)
@@ -337,7 +315,8 @@ def evaluate_gate(diffres: DiffResult, calibration: CalibrationRecord | None,
     reasons: list[str] = []
     if significant_regression:
         reasons.append(
-            f"aggregate {primary_metric} regressed: 95% CI upper bound {ci[1]:.4f} < 0"
+            f"stable-query {primary_metric} regressed: 95% CI upper bound {ci[1]:.4f} < 0 "
+            f"(over {len(stable)} stable queries)"
         )
     if mcnemar_regression:
         for flag, (label, p, lb, lc) in zip(rejected, labels):
@@ -358,6 +337,8 @@ def evaluate_gate(diffres: DiffResult, calibration: CalibrationRecord | None,
         "bh_rejected": bh_rejected,
         "mcnemar_significant": mcnemar_regression,
         "near_tie_excluded": len(unstable_ids),
+        "n_stable": len(stable),
+        "n_unstable": len(unstable),
     }
     return GateResult(
         passed=passed,

@@ -72,3 +72,40 @@ def test_phase0_custom_change_measures_true_factor(tmp_path):
     assert len(per) == 1 and per[0]["name"] == "fusion"
     # fidelity is 1.0 by construction (verified causes actually recover)
     assert report.attribution["fidelity"] == 1.0
+
+
+def test_phase0_checkpoints_not_reused_across_corpora(tmp_path):
+    # Arm checkpoints keyed by change name alone would resume corpus-v1 arm
+    # evals after the docs change (arm_ids hash only the factor assignment), so
+    # a second `recall phase0` run would judge the new diff against stale
+    # evals. The key must be content-addressed by the diffed snapshots.
+    import shutil
+
+    from recallops.phase0 import _run_change
+
+    store = ProjectStore(tmp_path / "s")
+    corpus = tmp_path / "docs"
+    shutil.copytree(CORPUS, corpus)
+    change = ConfigChange(
+        "fusion", {"retrieve": {"top_k": 10, "hybrid": {"sparse": "bm25",
+                   "fusion": "weighted", "bm25_weight": 0.0}}}, "retrieve")
+
+    def one_pass() -> dict[str, str]:
+        base = ingest(store, corpus, build_pipeline({}), None).manifest
+        ds = generate(store, base, n=8, seed=0, name="phase0")
+        _run_change(store, corpus, base, ds, change, {}, None)
+        jobs = store.list_json("job")
+        return {key: store.get_json("job", key) for key in jobs}
+
+    first = one_pass()
+    assert len(first) == 1
+
+    doc = sorted(corpus.rglob("*.md"))[0]
+    doc.write_text(doc.read_text() + "\n\nA new paragraph changes this corpus.\n")
+
+    second = one_pass()
+    assert len(second) == 2, "edited corpus must get its own arm checkpoint"
+    (old_key, old_ckpt), = first.items()
+    new_key = next(k for k in second if k != old_key)
+    assert set(second[new_key].values()) != set(old_ckpt.values()), (
+        "second pass must evaluate fresh arms, not resume corpus-v1 run_ids")

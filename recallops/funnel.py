@@ -43,13 +43,14 @@ _LARGE = 10 ** 9
 
 
 def tracer_chunk(before: QueryEval, expected_sources: list[str],
-                 chunk_doc_map_a: dict[str, str]) -> str | None:
+                 chunk_doc_paths_a: dict[str, tuple[str, ...]]) -> str | None:
     """A's previously-winning chunk: the top-ranked chunk in A's final list
     whose source document is one of ``expected_sources`` (FR-6 preamble).
-    Returns ``None`` when A ranked no expected-doc chunk at all."""
+    A chunk's document may exist at several byte-identical paths; any of them
+    matching counts. Returns ``None`` when A ranked no expected-doc chunk."""
     want = set(expected_sources)
     for cid, _ in before.ranked_chunks:
-        if chunk_doc_map_a.get(cid) in want:
+        if any(p in want for p in chunk_doc_paths_a.get(cid, ())):
             return cid
     return None
 
@@ -102,7 +103,7 @@ def funnel_for_query(engine_a: RetrievalEngine, engine_b: RetrievalEngine,
     ``ann_divergence`` compares an optional live run's dense rank against that
     shadow (FR-6.2, FR-6.3).
     """
-    tracer = tracer_chunk(qdiff.before, case.expected_sources, engine_a.chunk_doc_map())
+    tracer = tracer_chunk(qdiff.before, case.expected_sources, engine_a.chunk_doc_paths())
     if tracer is None:
         return FunnelReport(
             target_chunk_before="",

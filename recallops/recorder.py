@@ -47,6 +47,7 @@ class Recorder:
         self._pairs: dict[str, str] = {}
         self._chunks: list[ChunkRecord] = []
         self._ordinals: dict[str, int] = {}
+        self._chunk_ids_by_doc: dict[str, list[str]] = {}
         self._text_hash_by_chunk: dict[str, str] = {}
         self._emb_model_key: str | None = None
         self._retrieval: dict[str, dict[str, list[tuple[str, float]]]] = {}
@@ -93,6 +94,13 @@ class Recorder:
         return doc_id
 
     def log_chunks(self, doc_id: str, chunks: list[dict]) -> list[str]:
+        # Byte-identical files share one content-addressed doc_id; managed
+        # ingest chunks each document once, so a repeat call for the same
+        # doc_id returns the already-logged chunk ids rather than appending
+        # duplicate records (which would double-count and desync the shared
+        # chunkset from managed-mode content).
+        if doc_id in self._chunk_ids_by_doc:
+            return list(self._chunk_ids_by_doc[doc_id])
         chunk_stage = self._stage_for("chunk", _DEFAULT_CHUNK)
         parse_stage = self._recorded("parse", _DEFAULT_PARSE)
         chunk_ids: list[str] = []
@@ -115,6 +123,7 @@ class Recorder:
             self._chunks.append(record)
             self._text_hash_by_chunk[record.chunk_id] = record.text_hash
             chunk_ids.append(record.chunk_id)
+        self._chunk_ids_by_doc[doc_id] = list(chunk_ids)
         return chunk_ids
 
     def log_embeddings(self, provider: str, model: str, chunk_ids: list[str],
@@ -134,8 +143,42 @@ class Recorder:
         # already declared explicitly, canonicalize from its params so ph tracks
         # whatever embed stage lands in the manifest.
         existing = next((s for s in self._stages if s.id == "embed"), None)
-        spec = existing or embed_stage_spec(provider, model, dims, params)
-        canon = get_provider(dict(spec.params))
+        candidate = embed_stage_spec(provider, model, dims, params)
+        spec = existing or candidate
+
+        def _canon(stage: StageSpec):
+            try:
+                return get_provider(dict(stage.params))
+            except KeyError as exc:
+                raise ValueError(
+                    f"embed stage params {stage.params!r} cannot resolve an embedding "
+                    f"provider (missing {exc}); declare the stage with provider/model/dims"
+                ) from exc
+
+        # Vectors are always keyed under the stage that lands in the manifest.
+        canon = _canon(spec)
+        # A snapshot records exactly one embed stage. Quietly keying this call's
+        # vectors under a DIFFERENT already-recorded stage would drop them (the
+        # old keys already exist, so the store writes nothing) while the manifest
+        # claims the old model — mirror _register and refuse. Compare each value
+        # this call states EXPLICITLY (candidate.params: provider/model/dims plus
+        # any params it passed) against the existing stage's CANONICAL identity
+        # (defaults filled in, e.g. seed=0/ngram=[1,2] for local), so a stated
+        # value that contradicts a defaulted one is caught while a caller that
+        # omits a declared stage's params is not flagged.
+        existing_identity = {"provider": canon.provider, "model": canon.model, **canon.params}
+        if existing is not None:
+            conflicts = {
+                k: (existing_identity[k], v)
+                for k, v in candidate.params.items()
+                if k in existing_identity and existing_identity[k] != v
+            }
+            if conflicts:
+                raise ValueError(
+                    f"log_embeddings(provider={provider!r}, model={model!r}, dims={dims}) "
+                    f"conflicts with the already-recorded embed stage on {sorted(conflicts)} "
+                    f"(recorded {existing.params!r})"
+                )
         ph = hashing.params_hash(canon.params)
         model_key = canon.model_key
         embs: dict[str, np.ndarray] = {}

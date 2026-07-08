@@ -57,11 +57,21 @@ jobs:
       # snapshot + dataset (+ calibration) to gate against. Options: actions/cache
       # keyed on your corpus, a checked-in `.recall/`, or download from BYO
       # object storage. Without this the gate has nothing to diff against.
+      #
+      # PRs RESTORE ONLY (actions/cache/restore, no save): every PR must gate
+      # against the same main-branch baseline. If PRs also saved the cache, push
+      # 2 of a PR would restore push 1's store and diff against itself — the
+      # regression would look like "no change" and merge green. The baseline is
+      # advanced by the `push: main` run below, which saves after a merge lands.
       - name: Restore RecallOps store (baseline snapshot + dataset + calibration)
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: .recall
-          key: recall-store-${{ github.repository }}   # TODO(you): tune the key
+          # Restore the newest main-branch baseline. actions/cache falls back to
+          # the default branch's caches, so PRs see main's latest, not their own.
+          key: recall-store-main
+          restore-keys: |
+            recall-store-main-
 
       - name: Run RecallOps gate (ingest + eval + diff + funnel)
         id: gate
@@ -73,6 +83,18 @@ jobs:
           DIFF_ID="$(grep -oE 'diff_[0-9a-f]+' recall-ci.log | head -1)"
           echo "diff_id=${DIFF_ID}" >> "$GITHUB_OUTPUT"
           echo "${DIFF_ID}" > recall-diff-id.txt
+
+      # Advance the baseline ONLY when a commit lands on main. The store now
+      # holds the merged snapshot; every future PR gates against it. Runs
+      # regardless of the gate outcome — main is the source of truth — and PRs
+      # never reach here, so a PR can never rebaseline against itself. Each main
+      # push writes an immutable cache; the restore step above picks the newest.
+      - name: Save advanced baseline (main only)
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/cache/save@v4
+        with:
+          path: .recall
+          key: recall-store-main-${{ github.run_id }}
 
       - name: Post phase-1 report as a PR comment
         if: ${{ github.event_name == 'pull_request' }}
