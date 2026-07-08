@@ -1,6 +1,10 @@
 name: Release
 
-# Publishes RecallOps to PyPI when a GitHub Release is published.
+# Publishes RecallOps to PyPI when a `vX.Y.Z` tag is pushed, and creates the
+# matching GitHub Release from the CHANGELOG. Versioning is tag-derived
+# (hatch-vcs): the tag IS the version, so there is nothing to edit in the repo
+# before releasing — a release is `git tag -a vX.Y.Z -m vX.Y.Z && git push
+# origin vX.Y.Z`.
 #
 # ─────────────────────────────────────────────────────────────────────────────
 # ONE-TIME SETUP: PyPI Trusted Publishing (OIDC, no API token)
@@ -9,75 +13,151 @@ name: Release
 # Publishing"; there is NO PyPI API token stored as a secret. Before the first
 # release you must register this workflow as a trusted publisher on PyPI:
 #
-#   1. Log in to https://pypi.org and open the project's
-#      "Publishing" settings (for a brand-new project use
-#      https://pypi.org/manage/account/publishing/ to pre-register a
-#      "pending" publisher).
-#   2. Add a GitHub Actions trusted publisher with:
-#        - Owner:            OWNER               (your GitHub org/user)
+#   1. Log in to https://pypi.org. For a brand-new project use
+#      https://pypi.org/manage/account/publishing/ to pre-register a "pending"
+#      publisher; for an existing project use its "Publishing" settings.
+#   2. Add a GitHub Actions trusted publisher with EXACTLY:
+#        - Owner:            skundu42
 #        - Repository:       recallops
 #        - Workflow name:    release.yml
 #        - Environment:      pypi                (must match the job below)
 #   3. In this repo's Settings -> Environments, create an environment named
-#      `pypi` (optionally add required reviewers / branch protection).
+#      `pypi` (optionally add required reviewers so a human approves each
+#      deployment before it publishes).
 #
-# NOTE ON THE DISTRIBUTION NAME: "recallops" is currently TAKEN on PyPI. The
-# import package stays `recallops`, but the *published* distribution name must
-# be finalised (and matched in pyproject `[project].name` + the trusted
-# publisher registration) before the first successful upload. See
-# docs/PUBLISHING.md.
+# The OIDC identity uses the CANONICAL repo slug `skundu42/recallops`; if the
+# repo is ever renamed, update the trusted-publisher entry to match or PyPI will
+# reject the upload. Keep the workflow filename `release.yml` and the
+# environment name `pypi` in sync with the registration. See docs/PUBLISHING.md.
 # ─────────────────────────────────────────────────────────────────────────────
 
 on:
-  release:
-    types: [published]
-  # Manual trigger for dry-runs / re-publishing a fixed build. Note: OIDC
-  # publishing still requires the `pypi` environment + trusted publisher.
+  push:
+    tags:
+      - "v*"
+  # Manual trigger to re-run a release for an existing tag (select the tag as
+  # the ref). OIDC publishing still requires the `pypi` environment + trusted
+  # publisher; the version/tag guard below still applies.
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  pypi-publish:
-    name: Build and publish to PyPI
+  build:
+    name: Build and verify (sdist + wheel)
     runs-on: ubuntu-latest
-    environment:
-      name: pypi
-      # Optional: surface the project page on the deployment once the name is
-      # finalised, e.g. url: https://pypi.org/p/recallops
-    permissions:
-      contents: read
-      id-token: write   # REQUIRED for OIDC Trusted Publishing (no API token)
+    outputs:
+      version: ${{ steps.verify.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # hatch-vcs derives the version from tags; a shallow clone has none.
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
       - name: Install build tooling
-        run: pip install build
+        run: pip install build twine
 
       - name: Build distributions
         run: python -m build
 
       - name: Validate distribution metadata
+        run: twine check dist/*
+
+      - name: Verify built version matches the tag
+        id: verify
         run: |
-          pip install twine
-          twine check dist/*
+          set -euo pipefail
+          # e.g. dist/recallops-0.1.1-py3-none-any.whl -> 0.1.1
+          wheel="$(ls dist/*.whl)"
+          built="$(basename "$wheel" | sed -E 's/^recallops-([^-]+)-.*/\1/')"
+          echo "built version: $built"
+          echo "version=$built" >> "$GITHUB_OUTPUT"
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            tag_ver="${GITHUB_REF_NAME#v}"
+            if [ "$built" != "$tag_ver" ]; then
+              echo "::error::Built version '$built' != tag '$GITHUB_REF_NAME' (expected '$tag_ver'). Tags not fetched, or a dirty/untagged commit." >&2
+              exit 1
+            fi
+          fi
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*
+          if-no-files-found: error
+
+  pypi-publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/recallops
+    permissions:
+      contents: read
+      id-token: write   # REQUIRED for OIDC Trusted Publishing (no API token)
+    steps:
+      - name: Download built distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
 
       # Uses OIDC automatically; picks up dist/ by default. No `password:`.
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
 
+  github-release:
+    name: Create GitHub Release
+    needs: [build, pypi-publish]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # to create the Release
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract changelog section for this tag
+        id: notes
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Pull the `## [X.Y.Z]` block out of CHANGELOG.md as the release notes.
+          awk -v ver="$VERSION" '
+            $0 ~ "^## \\[" ver "\\]" { flag=1; next }
+            flag && /^## \[/ { exit }
+            flag { print }
+          ' CHANGELOG.md | sed '/./,$!d' > notes.md
+          if [ ! -s notes.md ]; then
+            echo "no CHANGELOG section for $VERSION; will auto-generate notes" >&2
+            echo "generate=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "generate=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.notes.outputs.generate }}" = "true" ]; then
+            gh release create "$TAG" --title "$TAG" --generate-notes
+          else
+            gh release create "$TAG" --title "$TAG" --notes-file notes.md
+          fi
+
       # ── Optional: TestPyPI dry-run ─────────────────────────────────────────
-      # To rehearse against TestPyPI instead of (or before) PyPI, register a
-      # trusted publisher on https://test.pypi.org the same way, point the job's
-      # `environment.name` at a `testpypi` environment, and swap the publish
-      # step for:
-      #
-      #   - name: Publish to TestPyPI
-      #     uses: pypa/gh-action-pypi-publish@release/v1
-      #     with:
-      #       repository-url: https://test.pypi.org/legacy/
+      # To rehearse against TestPyPI, register a trusted publisher on
+      # https://test.pypi.org the same way (environment e.g. `testpypi`) and add
+      # a job mirroring `pypi-publish` with:
+      #   environment: { name: testpypi }
+      #   - uses: pypa/gh-action-pypi-publish@release/v1
+      #     with: { repository-url: https://test.pypi.org/legacy/ }

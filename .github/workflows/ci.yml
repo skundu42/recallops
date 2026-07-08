@@ -85,6 +85,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Version is tag-derived (hatch-vcs); fetch tags so the built version
+          # is real (a shallow clone would fall back to a dev/0.0.0 version).
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:

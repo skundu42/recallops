@@ -2,9 +2,12 @@
 # taken on PyPI). "recallops" was free on PyPI at rename time, re-verify
 # availability and configure the trusted publisher before the first release.
 # See docs/PUBLISHING.md.
+#
+# Version is tag-derived (hatch-vcs): the version comes from the latest `vX.Y.Z`
+# git tag, never a literal in this file. Release = tag + push; see release.yml.
 [project]
 name = "recallops"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Retrieval regression testing with verified root-cause attribution for RAG pipelines."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -46,18 +49,28 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/OWNER/recallops"
-Repository = "https://github.com/OWNER/recallops"
-Documentation = "https://github.com/OWNER/recallops/tree/main/docs"
-Issues = "https://github.com/OWNER/recallops/issues"
-Changelog = "https://github.com/OWNER/recallops/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/skundu42/recallops"
+Repository = "https://github.com/skundu42/recallops"
+Documentation = "https://github.com/skundu42/recallops/tree/main/docs"
+Issues = "https://github.com/skundu42/recallops/issues"
+Changelog = "https://github.com/skundu42/recallops/blob/main/CHANGELOG.md"
 
 [project.scripts]
 recall = "recallops.cli:main"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
+
+# Version source of truth = the latest `vX.Y.Z` git tag (PEP 440 normalized, so
+# `v0.1.1` -> `0.1.1`). A build from an untagged commit is a dev version
+# (`X.Y.Z.devN+g<sha>`); only a tagged commit produces a clean release version.
+# `fallback_version` keeps builds from failing when no tag/`.git` is reachable.
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.version.raw-options]
+fallback_version = "0.0.0"
 
 [tool.hatch.build.targets.wheel]
 packages = ["recallops"]

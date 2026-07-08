@@ -483,7 +483,6 @@ wheels = [
 
 [[package]]
 name = "recallops"
-version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
@@ -516,7 +515,7 @@ requires-dist = [
     { name = "rich", specifier = ">=13.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
 ]
-provides-extras = ["pg", "dev"]
+provides-extras = ["dev", "pg"]
 
 [[package]]
 name = "rich"

@@ -5,7 +5,15 @@ confirm, gating, report) are imported from their modules directly.
 """
 from __future__ import annotations
 
-__version__ = "0.1.0"
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
+
+try:
+    # Single source of truth: the installed distribution metadata, which is
+    # baked from the git tag at build time (hatch-vcs). See pyproject.toml.
+    __version__ = _pkg_version("recallops")
+except PackageNotFoundError:  # running from a source tree with no install
+    __version__ = "0.0.0+unknown"
 
 from .adapters.base import Capability, VectorAdapter
 from .adapters.local import LocalIndexAdapter

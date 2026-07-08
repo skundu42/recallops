@@ -9,8 +9,35 @@ changes; these will always be called out under **Changed** or **Removed**.
 
 ## [Unreleased]
 
-_Nothing yet. Add user-facing changes here under the appropriate heading
-(`Added`, `Changed`, `Fixed`, `Removed`, `Deprecated`, `Security`)._
+### Fixed
+
+- `recall gc` no longer deletes snapshots it was told to keep: with fewer
+  snapshots than `--keep` the retention slice wrapped negative and pruned the
+  oldest snapshots. It now also removes index rows before unlinking artifact
+  files, so an interrupted `gc` cannot poison the embedding cache.
+- Serving collections now include the corpus identity, so re-ingesting an edited
+  corpus under the same pipeline no longer keeps serving chunks of deleted
+  documents (which crashed reranked live evals and skewed live metrics).
+- Byte-identical source files (which share one content-addressed `doc_id`) no
+  longer duplicate chunk records / inflate `chunk_count`, and a golden case that
+  names any one of the identical paths now scores correctly instead of `0`.
+- Statistical gate: the bootstrap CI is computed over stable queries only, so
+  near-tie serving noise can no longer turn a gate red (the never-flaky
+  invariant); the excluded near-tie count is surfaced in the gate details.
+- SDK `Recorder`: `log_embeddings` raises on a conflicting model/param instead of
+  silently dropping vectors; `log_chunks` de-duplicates byte-identical documents.
+- Phase-0 arm checkpoints are content-addressed by diff id, so re-runs no longer
+  reuse stale arm evals from a different corpus/config.
+- Retrieval replays Recorder-logged candidates for a bespoke rerank stage instead
+  of crashing every eval; managed-mode unknown reranker tools get a clear error.
+
+### Changed
+
+- **Versioning is now tag-derived** (hatch-vcs): the version comes from the
+  latest `vX.Y.Z` git tag, not a literal in `pyproject.toml`. Cutting a release
+  is `git tag -a vX.Y.Z && git push origin vX.Y.Z`; pushing the tag builds,
+  publishes to PyPI via Trusted Publishing, and creates the GitHub Release from
+  this changelog. See `docs/PUBLISHING.md`.
 
 ## [0.1.0] - 2026-07-07
 
@@ -73,5 +100,5 @@ factor actually recovers the query.
 - **Packaging**: Apache-2.0 licensed, ships `py.typed`, supports Python
   3.11 to 3.13, PyPI-metadata-valid (hatchling backend).
 
-[Unreleased]: https://github.com/OWNER/recallops/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/OWNER/recallops/releases/tag/v0.1.0
+[Unreleased]: https://github.com/skundu42/recallops/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/skundu42/recallops/releases/tag/v0.1.0

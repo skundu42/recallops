@@ -4,7 +4,7 @@
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python 3.11 to 3.13](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue.svg)](https://www.python.org/downloads/)
-[![CI](https://github.com/OWNER/recallops/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/recallops/actions/workflows/ci.yml)
+[![CI](https://github.com/skundu42/recallops/actions/workflows/ci.yml/badge.svg)](https://github.com/skundu42/recallops/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/recallops.svg)](https://pypi.org/project/recallops/)
 
 Teams change embedding models, chunkers, parsers, hybrid-search weights, rerankers,
@@ -424,7 +424,7 @@ most useful thing you can bring.
 Contributions are welcome. Set up a dev environment with `pip install -e ".[dev]"`
 (or `uv pip install -e ".[dev]"`), then run `pytest` and `ruff check` before opening a
 PR. Please open an issue at
-[github.com/OWNER/recallops/issues](https://github.com/OWNER/recallops/issues) to
+[github.com/skundu42/recallops/issues](https://github.com/skundu42/recallops/issues) to
 discuss larger changes first. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full
 guide.
 

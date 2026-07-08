@@ -22,7 +22,7 @@ Report privately, in order of preference:
 
 1. **GitHub private advisory**: use the repository's
    **Security → Report a vulnerability** page
-   (`https://github.com/OWNER/recallops/security/advisories/new`), which opens a
+   (`https://github.com/skundu42/recallops/security/advisories/new`), which opens a
    private [GitHub Security Advisory](https://docs.github.com/en/code-security/security-advisories).
 2. **Email**: `security@OWNER` _(placeholder: replace `OWNER` with the
    project's real security contact address before publishing)_.
