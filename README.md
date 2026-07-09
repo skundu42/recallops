@@ -78,10 +78,9 @@ regression apart from ANN index noise, which a serving-side tool cannot.
 pip install recallops
 ```
 
-> **Name note:** the package is `recallops` (the name `recallkit` was already taken on
-> PyPI). It is not published yet, so `pip install recallops` is the intended UX rather
-> than a live package today, until the first release, install from source (below). The
-> **import** name is `recallops` and the console script is `recall`.
+> **Name note:** the distribution is `recallops` (the name `recallkit` was already taken
+> on PyPI). The **import** name is also `recallops` and the console script is `recall`.
+> Pin a version for reproducible installs, e.g. `pip install "recallops==0.1.0"`.
 
 The default stack (local hash embeddings + built-in exact-KNN adapter) runs fully
 **offline at $0**, no API keys, no server. For the pgvector adapter:
@@ -94,7 +93,7 @@ Develop against a checkout:
 
 ```bash
 pip install -e ".[dev]"          # or: uv pip install -e ".[dev]"
-pytest                           # 556 tests; pgvector live tests auto-skip unless RECALL_PG_DSN is set
+pytest                           # full suite; pgvector live tests auto-skip unless RECALL_PG_DSN is set
 ruff check
 ```
 
