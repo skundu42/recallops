@@ -9,37 +9,10 @@ changes; these will always be called out under **Changed** or **Removed**.
 
 ## [Unreleased]
 
-### Fixed
+_Nothing yet. Add user-facing changes here under the appropriate heading
+(`Added`, `Changed`, `Fixed`, `Removed`, `Deprecated`, `Security`)._
 
-- `recall gc` no longer deletes snapshots it was told to keep: with fewer
-  snapshots than `--keep` the retention slice wrapped negative and pruned the
-  oldest snapshots. It now also removes index rows before unlinking artifact
-  files, so an interrupted `gc` cannot poison the embedding cache.
-- Serving collections now include the corpus identity, so re-ingesting an edited
-  corpus under the same pipeline no longer keeps serving chunks of deleted
-  documents (which crashed reranked live evals and skewed live metrics).
-- Byte-identical source files (which share one content-addressed `doc_id`) no
-  longer duplicate chunk records / inflate `chunk_count`, and a golden case that
-  names any one of the identical paths now scores correctly instead of `0`.
-- Statistical gate: the bootstrap CI is computed over stable queries only, so
-  near-tie serving noise can no longer turn a gate red (the never-flaky
-  invariant); the excluded near-tie count is surfaced in the gate details.
-- SDK `Recorder`: `log_embeddings` raises on a conflicting model/param instead of
-  silently dropping vectors; `log_chunks` de-duplicates byte-identical documents.
-- Phase-0 arm checkpoints are content-addressed by diff id, so re-runs no longer
-  reuse stale arm evals from a different corpus/config.
-- Retrieval replays Recorder-logged candidates for a bespoke rerank stage instead
-  of crashing every eval; managed-mode unknown reranker tools get a clear error.
-
-### Changed
-
-- **Versioning is now tag-derived** (hatch-vcs): the version comes from the
-  latest `vX.Y.Z` git tag, not a literal in `pyproject.toml`. Cutting a release
-  is `git tag -a vX.Y.Z && git push origin vX.Y.Z`; pushing the tag builds,
-  publishes to PyPI via Trusted Publishing, and creates the GitHub Release from
-  this changelog. See `docs/PUBLISHING.md`.
-
-## [0.1.0] - 2026-07-07
+## [0.1.0] - 2026-07-09
 
 Initial engine. RecallOps is retrieval regression testing with **verified**
 counterfactual root-cause attribution for RAG pipelines: it versions the
@@ -80,7 +53,7 @@ factor actually recovers the query.
   tags with Benjamini-Hochberg FDR. Designed to be never-flaky.
 - **Narratives**: human-readable explanations constrained to structured
   evidence; no narrative claim is emitted that is not backed by the report.
-- **CLI**: 16 commands: `init`, `ingest`, `snapshot`, `dataset`, `eval`,
+- **CLI**: 17 commands: `init`, `ingest`, `snapshot`, `dataset`, `eval`,
   `calibrate`, `diff`, `attribute`, `compare-embeddings`, `compare-chunkers`,
   `sweep`, `drift`, `ci`, `report`, `gc`, `scorecard`, `phase0`.
 - **Adapters**: built-in local exact-KNN adapter (offline, $0) and an opt-in
@@ -97,8 +70,35 @@ factor actually recovers the query.
 - **Provider cost gating**: any provider-billed operation prints a cost
   estimate and requires explicit approval (`--yes` / `--max-cost`); the local
   provider is $0 and auto-approves.
-- **Packaging**: Apache-2.0 licensed, ships `py.typed`, supports Python
-  3.11 to 3.13, PyPI-metadata-valid (hatchling backend).
+- **Packaging & release**: Apache-2.0 licensed, ships `py.typed`, supports
+  Python 3.11 to 3.13, PyPI-metadata-valid (hatchling backend). The version is
+  tag-derived (hatch-vcs), and a `vX.Y.Z` tag publishes to PyPI automatically
+  via GitHub Actions Trusted Publishing (OIDC, no stored token). See
+  `docs/PUBLISHING.md`.
+
+### Fixed
+
+Pre-release hardening from an adversarial review of the engine:
+
+- `recall gc` no longer deletes snapshots it was told to keep: with fewer
+  snapshots than `--keep` the retention slice wrapped negative and pruned the
+  oldest snapshots. It now also removes index rows before unlinking artifact
+  files, so an interrupted `gc` cannot poison the embedding cache.
+- Serving collections now include the corpus identity, so re-ingesting an edited
+  corpus under the same pipeline no longer keeps serving chunks of deleted
+  documents (which crashed reranked live evals and skewed live metrics).
+- Byte-identical source files (which share one content-addressed `doc_id`) no
+  longer duplicate chunk records / inflate `chunk_count`, and a golden case that
+  names any one of the identical paths now scores correctly instead of `0`.
+- Statistical gate: the bootstrap CI is computed over stable queries only, so
+  near-tie serving noise can no longer turn a gate red (the never-flaky
+  invariant); the excluded near-tie count is surfaced in the gate details.
+- SDK `Recorder`: `log_embeddings` raises on a conflicting model/param instead of
+  silently dropping vectors; `log_chunks` de-duplicates byte-identical documents.
+- Phase-0 arm checkpoints are content-addressed by diff id, so re-runs no longer
+  reuse stale arm evals from a different corpus/config.
+- Retrieval replays Recorder-logged candidates for a bespoke rerank stage instead
+  of crashing every eval; managed-mode unknown reranker tools get a clear error.
 
 [Unreleased]: https://github.com/skundu42/recallops/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/skundu42/recallops/releases/tag/v0.1.0
