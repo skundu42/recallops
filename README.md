@@ -19,27 +19,6 @@ tool, or an eval-metrics library; it integrates with those.
 
 ---
 
-## Contents
-
-- [Why RecallOps](#why-recallops)
-- [Features](#features)
-- [Install](#install)
-- [5-minute quickstart](#5-minute-quickstart-catch-a-regression)
-- [How verification works](#how-verification-works)
-- [CLI at a glance](#cli-at-a-glance)
-- [Where it fits, and what it is not](#where-it-fits-and-what-it-is-not)
-- [Bring your own pipeline (SDK)](#bring-your-own-pipeline-sdk)
-- [CI setup: the two-phase gate](#ci-setup-the-two-phase-gate)
-- [Honest at scale](#honest-at-scale)
-- [Metrics & determinism](#metrics--determinism)
-- [Project status & honest caveats](#project-status--honest-caveats)
-- [Docs & examples](#docs--examples)
-- [Contributing](#contributing)
-- [License](#license)
-- [Acknowledgements](#acknowledgements)
-
----
-
 ## Why RecallOps
 
 The wedge is **verified counterfactual attribution**. When retrieval regresses,
