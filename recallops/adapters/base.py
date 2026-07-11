@@ -42,3 +42,6 @@ class VectorAdapter(ABC):
 
     def rebuild(self, collection: str, seed: int = 0) -> None:
         """Rebuild the index (calibration hook, FR-9.2). Default: no-op."""
+
+    def close(self) -> None:
+        """Release client connections/locks. Default: no-op."""

@@ -123,7 +123,7 @@ class RetrievalEngine:
         cached = self.store.query_vector_cached(key)
         if cached is not None:
             return cached
-        vec = p.embed([question])[0]
+        vec = p.embed_queries([question])[0]
         self.store.cache_query_vector(key, vec)
         return vec
 

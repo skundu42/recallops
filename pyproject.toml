@@ -17,6 +17,7 @@ authors = [{ name = "RecallOps contributors" }]
 keywords = [
     "rag", "retrieval", "evaluation", "regression-testing", "vector-database",
     "embeddings", "pgvector", "attribution", "ci", "llm", "information-retrieval",
+    "qdrant", "chroma", "lancedb", "sentence-transformers",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -41,11 +42,28 @@ dependencies = [
 
 [project.optional-dependencies]
 pg = ["psycopg[binary]>=3.1"]
+qdrant = ["qdrant-client>=1.12"]
+chroma = ["chromadb>=1.0"]
+lancedb = ["lancedb>=0.34"]
+st = ["sentence-transformers>=3.0"]
+all = [
+    "psycopg[binary]>=3.1",
+    "qdrant-client>=1.12",
+    "chromadb>=1.0",
+    "lancedb>=0.34",
+    "sentence-transformers>=3.0",
+]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
     "ruff>=0.6",
     "build>=1.2",
+    # embedded adapter clients so the shared contract suite runs in repo CI;
+    # sentence-transformers stays out (heavy torch pull; its tests are
+    # env-gated anyway)
+    "qdrant-client>=1.12",
+    "chromadb>=1.0",
+    "lancedb>=0.34",
 ]
 
 [project.urls]

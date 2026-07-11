@@ -8,6 +8,7 @@ never exercised in tests.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from abc import ABC, abstractmethod
 from collections import Counter
@@ -32,6 +33,71 @@ _OPENAI_BATCH = 256
 _REMOTE_TOKENS_PER_S = 5000.0
 _LOCAL_TOKENS_PER_S = 200_000.0
 
+# Prices in USD per 1k tokens and native output dims, from the providers'
+# public pricing/API docs. Unknown models raise rather than silently
+# mispricing the cost gate.
+COHERE_PRICE_PER_1K = {
+    "embed-english-v3.0": 0.0001,
+    "embed-multilingual-v3.0": 0.0001,
+    "embed-v4.0": 0.00012,
+}
+_COHERE_DEFAULT_DIMS = {
+    "embed-english-v3.0": 1024,
+    "embed-multilingual-v3.0": 1024,
+    "embed-v4.0": 1536,
+}
+_COHERE_URL = "https://api.cohere.com/v2/embed"
+_COHERE_BATCH = 96
+
+VOYAGE_PRICE_PER_1K = {
+    "voyage-3.5": 0.00006,
+    "voyage-3.5-lite": 0.00002,
+    "voyage-3-large": 0.00018,
+}
+_VOYAGE_DEFAULT_DIMS = {
+    "voyage-3.5": 1024,
+    "voyage-3.5-lite": 1024,
+    "voyage-3-large": 1024,
+}
+_VOYAGE_URL = "https://api.voyageai.com/v1/embeddings"
+# Voyage's embeddings API accepts up to 1,000 texts per request (confirmed
+# against docs.voyageai.com/docs/embeddings, 2026-07); the brief's draft
+# value of 128 was overly conservative and has been corrected here.
+_VOYAGE_BATCH = 1000
+# Per-request TOKEN caps also apply and are model-specific (docs.voyageai.com
+# /docs/embeddings, 2026-07): 320K tokens for voyage-3.5, 120K for
+# voyage-3-large, 1M for voyage-3.5-lite. Default chunks run up to ~800
+# tokens, so a full 1,000-text batch can be ~800K tokens - well over the
+# tightest (voyage-3-large) cap. 100K keeps every batch under that cap with
+# a conservative margin, regardless of which Voyage model is in use.
+_VOYAGE_TOKEN_BUDGET = 100_000
+
+
+def _voyage_batches(texts: list[str]) -> list[list[str]]:
+    """Greedily group ``texts`` into Voyage request batches, flushing the
+    current batch when the next text would push it over the 1,000-text
+    count cap OR the estimated-token budget (whichever comes first). A
+    single text whose own estimate already exceeds the token budget is
+    sent alone rather than blocking forever. Token estimate matches
+    ``estimate_embed_cost``: ``len(text) // 4``.
+    """
+    batches: list[list[str]] = []
+    current: list[str] = []
+    current_tokens = 0
+    for text in texts:
+        est = len(text) // 4
+        if current and (
+            len(current) >= _VOYAGE_BATCH or current_tokens + est > _VOYAGE_TOKEN_BUDGET
+        ):
+            batches.append(current)
+            current = []
+            current_tokens = 0
+        current.append(text)
+        current_tokens += est
+    if current:
+        batches.append(current)
+    return batches
+
 
 class EmbeddingProvider(ABC):
     provider: str
@@ -42,6 +108,12 @@ class EmbeddingProvider(ABC):
     @abstractmethod
     def embed(self, texts: list[str]) -> np.ndarray:
         """Return (n, dims) fp32 L2-normalized vectors."""
+
+    def embed_queries(self, texts: list[str]) -> np.ndarray:
+        """Embed retrieval *queries*. Defaults to ``embed`` (documents);
+        providers whose models distinguish query from document inputs
+        (Cohere/Voyage ``input_type``) override this."""
+        return self.embed(texts)
 
     @abstractmethod
     def price_per_1k_tokens(self) -> float: ...
@@ -55,6 +127,36 @@ def _l2_normalize(mat: np.ndarray) -> np.ndarray:
     norms = np.linalg.norm(mat, axis=1, keepdims=True)
     norms[norms == 0.0] = 1.0
     return (mat / norms).astype(np.float32)
+
+
+def _post_json(url: str, body: dict, headers: dict) -> dict:
+    import urllib.request
+
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json", **headers},
+        method="POST",
+    )
+    with urllib.request.urlopen(req) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def cohere_request_body(model: str, texts: list[str], input_type: str) -> dict:
+    return {"model": model, "texts": list(texts), "input_type": input_type,
+            "embedding_types": ["float"]}
+
+
+def parse_cohere_embeddings(payload: dict) -> list[list[float]]:
+    return payload["embeddings"]["float"]
+
+
+def voyage_request_body(model: str, texts: list[str], input_type: str) -> dict:
+    return {"model": model, "input": list(texts), "input_type": input_type}
+
+
+def parse_voyage_embeddings(payload: dict) -> list[list[float]]:
+    return [d["embedding"] for d in sorted(payload["data"], key=lambda d: d["index"])]
 
 
 class LocalHashProvider(EmbeddingProvider):
@@ -89,6 +191,74 @@ class LocalHashProvider(EmbeddingProvider):
                 bucket, sign = self._bucket_sign(feature)
                 out[row, bucket] += sign * count
         return _l2_normalize(out)
+
+    def price_per_1k_tokens(self) -> float:
+        return 0.0
+
+
+ST_DEFAULT_MODEL = "all-MiniLM-L6-v2"
+_ST_DEFAULT_DIMS = {"all-MiniLM-L6-v2": 384}
+
+
+class SentenceTransformersProvider(EmbeddingProvider):
+    """Local real-semantics embeddings at $0 via sentence-transformers.
+
+    Device defaults to CPU: GPU kernels are nondeterministic and identical
+    inputs must produce identical vectors for content-addressing.
+    ``revision`` pins the HuggingFace model revision and is recorded in
+    ``params`` (hence the manifest); the default "main" is only
+    reproducible while the upstream model repo does not move, so pin a
+    commit for long-lived baselines.
+    """
+
+    def __init__(self, model: str = ST_DEFAULT_MODEL, dims: int | None = None,
+                 device: str = "cpu", revision: str | None = None):
+        if dims is None:
+            if model not in _ST_DEFAULT_DIMS:
+                raise ValueError(
+                    f"unknown sentence-transformers model {model!r}: pass dims explicitly"
+                )
+            dims = _ST_DEFAULT_DIMS[model]
+        self.provider = "st"
+        self.model = model
+        self.dims = int(dims)
+        self.device = str(device)
+        self.revision = str(revision) if revision else "main"
+        self.params = {"dims": self.dims, "device": self.device, "revision": self.revision}
+        self._model = None
+
+    def _load(self):
+        if self._model is None:
+            try:
+                from sentence_transformers import SentenceTransformer
+            except ImportError as exc:
+                raise ImportError(
+                    "sentence-transformers is not installed; run: pip install 'recallops[st]'"
+                ) from exc
+            model = SentenceTransformer(self.model, device=self.device,
+                                        revision=self.revision)
+            # get_sentence_embedding_dimension was renamed to
+            # get_embedding_dimension in sentence-transformers 5.x; prefer the
+            # new name when present and fall back to the old one so both
+            # pre- and post-rename releases work without a FutureWarning.
+            dims_getter = getattr(model, "get_embedding_dimension", None)
+            if dims_getter is None:
+                dims_getter = model.get_sentence_embedding_dimension
+            got = int(dims_getter())
+            if got != self.dims:
+                raise ValueError(
+                    f"sentence-transformers model {self.model!r} emits {got} dims, "
+                    f"config says {self.dims}"
+                )
+            self._model = model
+        return self._model
+
+    def embed(self, texts: list[str]) -> np.ndarray:
+        model = self._load()
+        mat = model.encode(list(texts), batch_size=32, convert_to_numpy=True,
+                           normalize_embeddings=True, show_progress_bar=False)
+        mat = np.asarray(mat, dtype=np.float32).reshape(len(texts), self.dims)
+        return _l2_normalize(mat)
 
     def price_per_1k_tokens(self) -> float:
         return 0.0
@@ -138,6 +308,117 @@ class OpenAIProvider(EmbeddingProvider):
         return OPENAI_PRICE_PER_1K[self.model]
 
 
+class CohereProvider(EmbeddingProvider):
+    """Cohere v2 embeddings over raw HTTP (no SDK dependency).
+
+    Cohere embeds queries and documents differently (``input_type``), so
+    ``embed_queries`` is a real override, not the default delegation.
+    """
+
+    def __init__(self, model: str = "embed-english-v3.0", dims: int | None = None,
+                 api_key: str | None = None):
+        if model not in COHERE_PRICE_PER_1K:
+            raise ValueError(f"unknown Cohere embedding model: {model!r}")
+        expected = _COHERE_DEFAULT_DIMS[model]
+        if dims is not None and int(dims) != expected:
+            raise ValueError(
+                f"Cohere model {model!r} emits {expected} dims, got dims={dims}"
+            )
+        self.provider = "cohere"
+        self.model = model
+        self.dims = expected
+        self.params = {"dims": self.dims}
+        self._api_key = api_key
+
+    def _key(self) -> str:
+        import os
+
+        key = self._api_key or os.environ.get("COHERE_API_KEY")
+        if not key:
+            raise RuntimeError(
+                "COHERE_API_KEY is not set; cannot call the Cohere embeddings API"
+            )
+        return key
+
+    def _embed_as(self, texts: list[str], input_type: str) -> np.ndarray:
+        key = self._key()
+        rows: list[list[float]] = []
+        for start in range(0, len(texts), _COHERE_BATCH):
+            batch = texts[start:start + _COHERE_BATCH]
+            payload = _post_json(
+                _COHERE_URL,
+                cohere_request_body(self.model, batch, input_type),
+                {"Authorization": f"Bearer {key}"},
+            )
+            rows.extend(parse_cohere_embeddings(payload))
+        mat = np.array(rows, dtype=np.float32).reshape(len(texts), self.dims)
+        return _l2_normalize(mat)
+
+    def embed(self, texts: list[str]) -> np.ndarray:
+        return self._embed_as(texts, "search_document")
+
+    def embed_queries(self, texts: list[str]) -> np.ndarray:
+        return self._embed_as(texts, "search_query")
+
+    def price_per_1k_tokens(self) -> float:
+        return COHERE_PRICE_PER_1K[self.model]
+
+
+class VoyageProvider(EmbeddingProvider):
+    """Voyage AI embeddings over raw HTTP (no SDK dependency).
+
+    Voyage embeds queries and documents differently (``input_type``), so
+    ``embed_queries`` is a real override, not the default delegation.
+    """
+
+    def __init__(self, model: str = "voyage-3.5", dims: int | None = None,
+                 api_key: str | None = None):
+        if model not in VOYAGE_PRICE_PER_1K:
+            raise ValueError(f"unknown Voyage embedding model: {model!r}")
+        expected = _VOYAGE_DEFAULT_DIMS[model]
+        if dims is not None and int(dims) != expected:
+            raise ValueError(
+                f"Voyage model {model!r} emits {expected} dims, got dims={dims}"
+            )
+        self.provider = "voyage"
+        self.model = model
+        self.dims = expected
+        self.params = {"dims": self.dims}
+        self._api_key = api_key
+
+    def _key(self) -> str:
+        import os
+
+        key = self._api_key or os.environ.get("VOYAGE_API_KEY")
+        if not key:
+            raise RuntimeError(
+                "VOYAGE_API_KEY is not set; cannot call the Voyage embeddings API"
+            )
+        return key
+
+    def _embed_as(self, texts: list[str], input_type: str) -> np.ndarray:
+        key = self._key()
+        rows: list[list[float]] = []
+        for batch in _voyage_batches(list(texts)):
+            payload = _post_json(
+                _VOYAGE_URL,
+                voyage_request_body(self.model, batch, input_type),
+                {"Authorization": f"Bearer {key}"},
+            )
+            rows.extend(parse_voyage_embeddings(payload))
+        mat = np.array(rows, dtype=np.float32).reshape(len(texts), self.dims)
+        return _l2_normalize(mat)
+
+    def embed(self, texts: list[str]) -> np.ndarray:
+        return self._embed_as(texts, "document")
+
+    def embed_queries(self, texts: list[str]) -> np.ndarray:
+        return self._embed_as(texts, "query")
+
+    def price_per_1k_tokens(self) -> float:
+        return VOYAGE_PRICE_PER_1K[self.model]
+
+
 def embed_stage_spec(provider: str, model: str, dims: int, params: dict) -> StageSpec:
     merged = {"provider": provider, "model": model, "dims": int(dims)}
     for k, v in params.items():
@@ -161,6 +442,16 @@ def get_provider(spec: dict) -> EmbeddingProvider:
         )
     if provider == "openai":
         return OpenAIProvider(model=model, dims=dims)
+    if provider == "cohere":
+        return CohereProvider(model=model, dims=dims)
+    if provider == "voyage":
+        return VoyageProvider(model=model, dims=dims)
+    if provider == "st":
+        return SentenceTransformersProvider(
+            model=model, dims=dims,
+            device=str(spec.get("device", "cpu")),
+            revision=spec.get("revision"),
+        )
     raise ValueError(f"unknown embedding provider: {provider!r}")
 
 

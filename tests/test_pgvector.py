@@ -6,6 +6,7 @@ import sys
 
 import numpy as np
 import pytest
+from adapter_contract import AdapterContract
 
 from recallops.adapters import pgvector as pg
 from recallops.adapters.base import VectorAdapter
@@ -186,3 +187,17 @@ def test_contract_roundtrip(live_adapter) -> None:
 
     adapter.drop(collection)
     assert adapter.count(collection) == 0
+
+
+class TestPgVectorContract(AdapterContract):
+    """Live contract run; probes=100 makes ivfflat effectively exact on the
+    tiny contract corpus so parity with the exact reference holds."""
+
+    @pytest.fixture()
+    def adapter(self):
+        pytest.importorskip("psycopg")
+        if not DSN:
+            pytest.skip("RECALL_PG_DSN not set; skipping live pgvector contract")
+        a = pg.PgVectorAdapter(DSN, probes=100)
+        yield a
+        a.close()

@@ -1,16 +1,28 @@
 from __future__ import annotations
 
+import os
+import sys
+import types
+
 import numpy as np
 import pytest
 
+import recallops.pipeline.providers as providers_module
 from recallops import hashing
 from recallops.pipeline.providers import (
+    CohereProvider,
     EmbeddingProvider,
     LocalHashProvider,
     OpenAIProvider,
+    SentenceTransformersProvider,
+    VoyageProvider,
+    cohere_request_body,
     embed_stage_spec,
     estimate_embed_cost,
     get_provider,
+    parse_cohere_embeddings,
+    parse_voyage_embeddings,
+    voyage_request_body,
 )
 
 
@@ -151,7 +163,7 @@ class TestStageSpecAndFactory:
 
     def test_get_provider_unknown_raises(self):
         with pytest.raises(ValueError):
-            get_provider({"provider": "cohere", "model": "embed-v3", "dims": 512})
+            get_provider({"provider": "nonexistent", "model": "m", "dims": 512})
 
 
 class TestEstimateEmbedCost:
@@ -177,3 +189,298 @@ class TestEstimateEmbedCost:
         texts = ["x" * 100, "y" * 55]
         p = OpenAIProvider("text-embedding-3-large")
         assert estimate_embed_cost(p, texts) == estimate_embed_cost(p, texts)
+
+
+class TestEmbedQueries:
+    def test_default_embed_queries_equals_embed(self):
+        p = LocalHashProvider()
+        texts = ["what is the refund window?", "how are invoices numbered?"]
+        assert np.array_equal(p.embed_queries(texts), p.embed(texts))
+
+    def test_subclass_override_is_used(self):
+        class Asymmetric(LocalHashProvider):
+            def embed_queries(self, texts):
+                return -super().embed(texts)
+
+        p = Asymmetric()
+        assert np.array_equal(p.embed_queries(["q"]), -p.embed(["q"]))
+
+
+class TestCohereProvider:
+    def test_request_body_documents(self):
+        body = cohere_request_body("embed-english-v3.0", ["a", "b"], "search_document")
+        assert body == {"model": "embed-english-v3.0", "texts": ["a", "b"],
+                        "input_type": "search_document", "embedding_types": ["float"]}
+
+    def test_parse_embeddings(self):
+        payload = {"embeddings": {"float": [[1.0, 0.0], [0.0, 1.0]]}}
+        assert parse_cohere_embeddings(payload) == [[1.0, 0.0], [0.0, 1.0]]
+
+    def test_unknown_model_rejected(self):
+        with pytest.raises(ValueError):
+            CohereProvider("embed-english-v99")
+
+    def test_dims_must_match_model(self):
+        with pytest.raises(ValueError):
+            CohereProvider("embed-english-v3.0", dims=512)
+        assert CohereProvider("embed-english-v3.0", dims=1024).dims == 1024
+
+    def test_embed_without_key_raises_before_network(self, monkeypatch):
+        monkeypatch.delenv("COHERE_API_KEY", raising=False)
+        with pytest.raises(RuntimeError):
+            CohereProvider().embed(["hello"])
+
+    def test_embed_uses_document_input_type_and_normalizes(self, monkeypatch):
+        seen = []
+
+        def fake_post(url, body, headers):
+            seen.append((url, body, headers))
+            return {"embeddings": {"float": [[3.0, 4.0] + [0.0] * 1022
+                                             for _ in body["texts"]]}}
+
+        monkeypatch.setattr(providers_module, "_post_json", fake_post)
+        monkeypatch.setenv("COHERE_API_KEY", "test-key")
+        p = CohereProvider()
+        mat = p.embed(["x", "y"])
+        assert mat.shape == (2, 1024)
+        assert np.allclose(np.linalg.norm(mat, axis=1), 1.0, atol=1e-5)
+        assert seen[0][1]["input_type"] == "search_document"
+        assert seen[0][2]["Authorization"] == "Bearer test-key"
+
+    def test_embed_queries_uses_query_input_type(self, monkeypatch):
+        seen = []
+
+        def fake_post(url, body, headers):
+            seen.append(body)
+            return {"embeddings": {"float": [[1.0] + [0.0] * 1023
+                                             for _ in body["texts"]]}}
+
+        monkeypatch.setattr(providers_module, "_post_json", fake_post)
+        monkeypatch.setenv("COHERE_API_KEY", "test-key")
+        CohereProvider().embed_queries(["what is x?"])
+        assert seen[0]["input_type"] == "search_query"
+
+    def test_price_positive_so_cost_gate_engages(self):
+        assert CohereProvider().price_per_1k_tokens() > 0.0
+
+    def test_model_key_shape(self):
+        p = CohereProvider()
+        assert p.model_key == (
+            f"cohere_embed-english-v3.0_1024_{hashing.params_hash(p.params)}"
+        )
+
+
+class TestVoyageProvider:
+    def test_request_body(self):
+        body = voyage_request_body("voyage-3.5", ["a"], "document")
+        assert body == {"model": "voyage-3.5", "input": ["a"], "input_type": "document"}
+
+    def test_parse_embeddings_sorts_by_index(self):
+        payload = {"data": [{"index": 1, "embedding": [0.0, 1.0]},
+                            {"index": 0, "embedding": [1.0, 0.0]}]}
+        assert parse_voyage_embeddings(payload) == [[1.0, 0.0], [0.0, 1.0]]
+
+    def test_unknown_model_rejected(self):
+        with pytest.raises(ValueError):
+            VoyageProvider("voyage-99")
+
+    def test_embed_without_key_raises_before_network(self, monkeypatch):
+        monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+        with pytest.raises(RuntimeError):
+            VoyageProvider().embed(["hello"])
+
+    def test_embed_queries_uses_query_input_type(self, monkeypatch):
+        seen = []
+
+        def fake_post(url, body, headers):
+            seen.append(body)
+            return {"data": [{"index": i, "embedding": [1.0] + [0.0] * 1023}
+                             for i in range(len(body["input"]))]}
+
+        monkeypatch.setattr(providers_module, "_post_json", fake_post)
+        monkeypatch.setenv("VOYAGE_API_KEY", "test-key")
+        p = VoyageProvider()
+        p.embed_queries(["q"])
+        p.embed(["d"])
+        assert seen[0]["input_type"] == "query"
+        assert seen[1]["input_type"] == "document"
+
+    def test_embed_normalizes_and_authorizes(self, monkeypatch):
+        seen = []
+
+        def fake_post(url, body, headers):
+            seen.append((url, body, headers))
+            return {"data": [{"index": i, "embedding": [3.0, 4.0] + [0.0] * 1022}
+                             for i in range(len(body["input"]))]}
+
+        monkeypatch.setattr(providers_module, "_post_json", fake_post)
+        monkeypatch.setenv("VOYAGE_API_KEY", "test-key")
+        p = VoyageProvider()
+        mat = p.embed(["x", "y"])
+        assert mat.shape == (2, 1024)
+        assert np.allclose(np.linalg.norm(mat, axis=1), 1.0, atol=1e-5)
+        assert seen[0][1]["input_type"] == "document"
+        assert seen[0][2]["Authorization"] == "Bearer test-key"
+
+    def test_model_key_shape(self):
+        p = VoyageProvider()
+        assert p.model_key == f"voyage_voyage-3.5_1024_{hashing.params_hash(p.params)}"
+
+    def test_price_positive_so_cost_gate_engages(self):
+        assert VoyageProvider().price_per_1k_tokens() > 0.0
+
+    @staticmethod
+    def _fake_post_indexed(calls: list[int]):
+        """Return a ``_post_json`` fake: records the per-request text count
+        and hands back an index-keyed, one-hot embedding per text so the
+        concatenated result's order can be checked against the input order
+        (a one-hot vector is unchanged by L2 normalization)."""
+        import zlib
+
+        def fake_post(url, body, headers):
+            texts = body["input"]
+            calls.append(len(texts))
+            data = []
+            for i, t in enumerate(texts):
+                pos = zlib.crc32(t.encode("utf-8")) % 1024
+                vec = [0.0] * 1024
+                vec[pos] = 1.0
+                data.append({"index": i, "embedding": vec})
+            return {"data": data}
+
+        return fake_post
+
+    def test_batches_split_on_token_budget_not_just_text_count(self, monkeypatch):
+        # Three texts of ~200,000 chars (~50,000 est tokens each, len//4) -
+        # two of them alone already hit the 100,000-token batch budget, so
+        # they must not be crammed into a single 1,000-text batch.
+        calls: list[int] = []
+        monkeypatch.setattr(providers_module, "_post_json", self._fake_post_indexed(calls))
+        monkeypatch.setenv("VOYAGE_API_KEY", "test-key")
+        p = VoyageProvider()
+        texts = ["x" * 200_000, "y" * 200_000, "z" * 200_000]
+        mat = p.embed(texts)
+        assert calls == [2, 1]
+        assert mat.shape == (3, 1024)
+        import zlib
+
+        for i, t in enumerate(texts):
+            pos = zlib.crc32(t.encode("utf-8")) % 1024
+            assert mat[i, pos] == pytest.approx(1.0)
+
+    def test_batches_still_split_on_1000_text_count_cap(self, monkeypatch):
+        calls: list[int] = []
+        monkeypatch.setattr(providers_module, "_post_json", self._fake_post_indexed(calls))
+        monkeypatch.setenv("VOYAGE_API_KEY", "test-key")
+        p = VoyageProvider()
+        texts = [f"tiny-{i}" for i in range(1001)]
+        mat = p.embed(texts)
+        assert calls == [1000, 1]
+        assert mat.shape == (1001, 1024)
+        import zlib
+
+        for i, t in enumerate(texts):
+            pos = zlib.crc32(t.encode("utf-8")) % 1024
+            assert mat[i, pos] == pytest.approx(1.0)
+
+    def test_single_text_over_token_budget_is_sent_alone(self, monkeypatch):
+        # ~125,000 est tokens (500,000 chars // 4), over the 100,000 budget:
+        # must go out as its own request rather than raise or get dropped.
+        calls: list[int] = []
+        monkeypatch.setattr(providers_module, "_post_json", self._fake_post_indexed(calls))
+        monkeypatch.setenv("VOYAGE_API_KEY", "test-key")
+        p = VoyageProvider()
+        texts = ["w" * 500_000]
+        mat = p.embed(texts)
+        assert calls == [1]
+        assert mat.shape == (1, 1024)
+
+
+class TestGetProviderNewBackends:
+    def test_cohere_dispatch(self):
+        p = get_provider({"provider": "cohere", "model": "embed-english-v3.0", "dims": 1024})
+        assert isinstance(p, CohereProvider)
+
+    def test_voyage_dispatch(self):
+        p = get_provider({"provider": "voyage", "model": "voyage-3.5", "dims": 1024})
+        assert isinstance(p, VoyageProvider)
+
+
+class TestSentenceTransformersProvider:
+    def test_defaults_and_params(self):
+        p = SentenceTransformersProvider()
+        assert p.provider == "st"
+        assert p.model == "all-MiniLM-L6-v2"
+        assert p.dims == 384
+        assert p.params == {"dims": 384, "device": "cpu", "revision": "main"}
+
+    def test_price_is_zero_so_cost_gate_auto_approves(self):
+        assert SentenceTransformersProvider().price_per_1k_tokens() == 0.0
+
+    def test_unknown_model_needs_explicit_dims(self):
+        with pytest.raises(ValueError):
+            SentenceTransformersProvider("some/custom-model")
+        p = SentenceTransformersProvider("some/custom-model", dims=768)
+        assert p.dims == 768
+
+    def test_revision_and_device_enter_params_and_model_key(self):
+        a = SentenceTransformersProvider()
+        b = SentenceTransformersProvider(revision="abc123")
+        assert b.params["revision"] == "abc123"
+        assert a.model_key != b.model_key
+
+    def test_construct_does_not_import_torch(self):
+        SentenceTransformersProvider()
+        # constructing must not pull in the heavyweight stack
+
+    def test_missing_package_raises_actionable_error(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "sentence_transformers", None)
+        with pytest.raises(ImportError, match=r"recallops\[st\]"):
+            SentenceTransformersProvider().embed(["hello"])
+
+    def test_dims_mismatch_raises_consistently_on_retry(self, monkeypatch):
+        class FakeModel:
+            def get_embedding_dimension(self):
+                return 999
+
+            def encode(self, *a, **k):
+                raise AssertionError("encode must not be reached on dims mismatch")
+
+        class FakeST:
+            def __init__(self, *a, **k):
+                pass
+
+        fake = types.ModuleType("sentence_transformers")
+        fake.SentenceTransformer = lambda *a, **k: FakeModel()
+        monkeypatch.setitem(sys.modules, "sentence_transformers", fake)
+        p = SentenceTransformersProvider()  # expects 384
+        with pytest.raises(ValueError, match="999"):
+            p.embed(["x"])
+        with pytest.raises(ValueError, match="999"):
+            p.embed(["x"])  # second call must raise the SAME clear error, not a reshape error
+        assert p._model is None
+
+    def test_get_provider_dispatch(self):
+        p = get_provider({"provider": "st", "model": "all-MiniLM-L6-v2", "dims": 384,
+                          "device": "cpu", "revision": "abc123"})
+        assert isinstance(p, SentenceTransformersProvider)
+        assert p.params["revision"] == "abc123"
+
+
+@pytest.mark.skipif(not os.environ.get("RECALL_ST_TESTS"),
+                    reason="set RECALL_ST_TESTS=1 to run tests that download the ST model")
+class TestSentenceTransformersLive:
+    def test_embed_shape_norm_determinism_and_query_equality(self):
+        pytest.importorskip("sentence_transformers")
+        p = SentenceTransformersProvider()
+        texts = ["the refund policy covers annual plans", "gateway timeouts default to thirty seconds"]
+        a = p.embed(texts)
+        b = p.embed(texts)
+        assert a.shape == (2, 384)
+        assert a.dtype == np.float32
+        assert np.allclose(np.linalg.norm(a, axis=1), 1.0, atol=1e-5)
+        assert np.array_equal(a, b)
+        assert np.array_equal(p.embed_queries(texts), a)
+        # real semantics: related texts are closer than unrelated ones
+        c = p.embed(["annual plan refunds", "the moon orbits the earth"])
+        assert float(np.dot(a[0], c[0])) > float(np.dot(a[0], c[1]))

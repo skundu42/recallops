@@ -226,7 +226,30 @@ def build_adapter(cfg: ProjectConfig, store: ProjectStore) -> VectorAdapter:
         if block.get("probes") is not None:
             kwargs["probes"] = int(block["probes"])
         return PgVectorAdapter(dsn, **kwargs)
-    raise ValueError(f"unknown adapter type {kind!r}; expected 'local' or 'pgvector'")
+    if kind == "qdrant":
+        from .adapters.qdrant import QdrantAdapter
+
+        url = block.get("url") or os.environ.get("RECALL_QDRANT_URL")
+        path = block.get("path")
+        if not url and not path:
+            path = str(store.base / "index" / "qdrant")
+        return QdrantAdapter(
+            url=url or None,
+            path=None if url else path,
+            api_key=block.get("api_key") or os.environ.get("RECALL_QDRANT_API_KEY"),
+        )
+    if kind == "chroma":
+        from .adapters.chroma import ChromaAdapter
+
+        return ChromaAdapter(str(block.get("path") or store.base / "index" / "chroma"))
+    if kind == "lancedb":
+        from .adapters.lancedb import LanceDBAdapter
+
+        return LanceDBAdapter(str(block.get("path") or store.base / "index" / "lancedb"))
+    raise ValueError(
+        f"unknown adapter type {kind!r}; expected one of "
+        f"'local', 'pgvector', 'qdrant', 'chroma', 'lancedb'"
+    )
 
 
 _LOCAL_DEFAULT_PARAMS = {"seed": 0, "ngram": [1, 2]}

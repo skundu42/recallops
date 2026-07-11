@@ -9,8 +9,22 @@ changes; these will always be called out under **Changed** or **Removed**.
 
 ## [Unreleased]
 
-_Nothing yet. Add user-facing changes here under the appropriate heading
-(`Added`, `Changed`, `Fixed`, `Removed`, `Deprecated`, `Security`)._
+### Added
+- Qdrant adapter (`recallops[qdrant]`): server or embedded local mode.
+- Chroma adapter (`recallops[chroma]`): embedded.
+- LanceDB adapter (`recallops[lancedb]`): embedded, exact flat scan.
+- Shared adapter behavioral contract test suite; all adapters must match the
+  exact local reference's cosine-similarity score semantics.
+- sentence-transformers embedding provider (`recallops[st]`): real semantics
+  at $0, CPU-pinned for determinism.
+- Cohere and Voyage embedding providers (no extra needed; raw HTTP), with
+  query/document input types and cost gating.
+- `EmbeddingProvider.embed_queries` hook (backward compatible: defaults to
+  `embed`).
+- `recallops[all]` convenience extra.
+
+### Unchanged
+- Snapshot ids are byte-identical to 0.1.0 (pinned by test).
 
 ## [0.1.0] - 2026-07-09
 
