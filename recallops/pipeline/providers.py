@@ -43,6 +43,12 @@ class EmbeddingProvider(ABC):
     def embed(self, texts: list[str]) -> np.ndarray:
         """Return (n, dims) fp32 L2-normalized vectors."""
 
+    def embed_queries(self, texts: list[str]) -> np.ndarray:
+        """Embed retrieval *queries*. Defaults to ``embed`` (documents);
+        providers whose models distinguish query from document inputs
+        (Cohere/Voyage ``input_type``) override this."""
+        return self.embed(texts)
+
     @abstractmethod
     def price_per_1k_tokens(self) -> float: ...
 

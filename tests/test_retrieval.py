@@ -306,3 +306,32 @@ def test_managed_unknown_reranker_surfaces_real_error(tmp_path, small_corpus):
     engine = RetrievalEngine(store, manifest)
     with pytest.raises(ValueError, match="unknown reranker"):
         engine.run_query("q1", "how do I bootstrap the alpha widget")
+
+
+def test_query_vector_uses_embed_queries(corpus_dir):
+    from click.testing import CliRunner
+
+    from recallops.cli import main
+    from recallops.retrieval import RetrievalEngine
+    from recallops.store import ProjectStore
+
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        for args in (["init", "--source", str(corpus_dir)], ["ingest"]):
+            result = runner.invoke(main, args)
+            assert result.exit_code == 0, result.output
+        store = ProjectStore(".")
+        manifest = store.list_snapshots()[-1]
+        engine = RetrievalEngine(store, manifest)
+        provider = engine.provider
+        calls: list[list[str]] = []
+        original = provider.embed_queries
+
+        def spy(texts):
+            calls.append(list(texts))
+            return original(texts)
+
+        provider.embed_queries = spy
+        vec = engine.query_vector("what is the refund window?")
+        assert calls == [["what is the refund window?"]]
+        assert vec.shape == (provider.dims,)

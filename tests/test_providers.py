@@ -177,3 +177,18 @@ class TestEstimateEmbedCost:
         texts = ["x" * 100, "y" * 55]
         p = OpenAIProvider("text-embedding-3-large")
         assert estimate_embed_cost(p, texts) == estimate_embed_cost(p, texts)
+
+
+class TestEmbedQueries:
+    def test_default_embed_queries_equals_embed(self):
+        p = LocalHashProvider()
+        texts = ["what is the refund window?", "how are invoices numbered?"]
+        assert np.array_equal(p.embed_queries(texts), p.embed(texts))
+
+    def test_subclass_override_is_used(self):
+        class Asymmetric(LocalHashProvider):
+            def embed_queries(self, texts):
+                return -super().embed(texts)
+
+        p = Asymmetric()
+        assert np.array_equal(p.embed_queries(["q"]), -p.embed(["q"]))
