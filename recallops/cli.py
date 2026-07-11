@@ -280,7 +280,9 @@ def main() -> None:
 
 
 @main.command()
-@click.option("--adapter", type=click.Choice(["local", "pgvector"]), default="local")
+@click.option("--adapter",
+              type=click.Choice(["local", "pgvector", "qdrant", "chroma", "lancedb"]),
+              default="local")
 @click.option("--source", default="docs", help="Documents directory.")
 @click.option("--name", default=None, help="Project name (default: directory name).")
 @click.option("--dsn", default=None, help="pgvector DSN (pgvector adapter only).")
@@ -332,8 +334,11 @@ def ingest(path: str | None, chunker: str | None, chunk_params: str | None,
     if store.list_snapshots():
         parent = store.resolve_snapshot("latest").snapshot_id
     vec_adapter = build_adapter(cfg, store)
-    report = run_ingest(store, source_dir, pipeline, adapter=vec_adapter, parent=parent,
-                        provider=provider)
+    try:
+        report = run_ingest(store, source_dir, pipeline, adapter=vec_adapter, parent=parent,
+                            provider=provider)
+    finally:
+        vec_adapter.close()
 
     m = report.manifest
     console.print(
@@ -494,53 +499,57 @@ def eval(dataset_id: str | None, snap: str, replay: bool, gate: str | None,
 
     mode = "replay" if replay else "live"
     adapter = None if replay else build_adapter(cfg, store)
-    ev = evaluate(store, m, ds, adapter=adapter, k_values=ks, mode=mode)
-    console.print(eval_table(ev))
+    try:
+        ev = evaluate(store, m, ds, adapter=adapter, k_values=ks, mode=mode)
+        console.print(eval_table(ev))
 
-    if fail_if:
-        metric, op, threshold = parse_fail_if(fail_if)
-        value = ev.aggregate.get(metric)
-        if value is None:
-            raise click.ClickException(f"metric {metric!r} not in eval aggregate")
-        comparators = {
-            "<": value < threshold, "<=": value <= threshold,
-            ">": value > threshold, ">=": value >= threshold,
-        }
-        if comparators[op]:
-            console.print(f"[red]Gate FAIL[/red]: {metric}={value:.4f} {op} {threshold}")
-            sys.exit(1)
-        console.print(f"[green]Gate PASS[/green]: {metric}={value:.4f}")
-        return
-
-    if gate == "statistical":
-        calib_raw = store.get_json("calibration", m.snapshot_id)
-        if calib_raw is None:
-            raise click.ClickException(
-                "statistical gating requires a calibration record for this snapshot; "
-                "run `recall calibrate` first."
-            )
-        parent = m.parent_snapshot
-        if parent is None:
-            console.print("No parent snapshot; nothing to gate against.")
+        if fail_if:
+            metric, op, threshold = parse_fail_if(fail_if)
+            value = ev.aggregate.get(metric)
+            if value is None:
+                raise click.ClickException(f"metric {metric!r} not in eval aggregate")
+            comparators = {
+                "<": value < threshold, "<=": value <= threshold,
+                ">": value > threshold, ">=": value >= threshold,
+            }
+            if comparators[op]:
+                console.print(f"[red]Gate FAIL[/red]: {metric}={value:.4f} {op} {threshold}")
+                sys.exit(1)
+            console.print(f"[green]Gate PASS[/green]: {metric}={value:.4f}")
             return
-        base = store.get_snapshot(parent)
-        ev_base = evaluate(store, base, ds, adapter=None, k_values=ks, mode="replay")
-        calib = CalibrationRecord.from_dict(calib_raw)
-        dr = run_diff(store, base, m, ds, ev_base, ev, epsilon=calib.epsilon,
-                      primary_metric=cfg.gate.get("primary_metric", "recall@5"))
-        try:
-            gres = evaluate_gate(dr, calib, mode="statistical",
-                                 primary_metric=cfg.gate.get("primary_metric", "recall@5"),
-                                 q=float(cfg.gate.get("q", 0.05)), dataset=ds)
-        except GateNotCalibrated as exc:
-            raise click.ClickException(str(exc))
-        verdict = "PASS" if gres.passed else "FAIL"
-        color = "green" if gres.passed else "red"
-        console.print(f"[{color}]Gate {verdict}[/{color}] (statistical)")
-        for reason in gres.reasons:
-            console.print(f"- {reason}")
-        if not gres.passed:
-            sys.exit(1)
+
+        if gate == "statistical":
+            calib_raw = store.get_json("calibration", m.snapshot_id)
+            if calib_raw is None:
+                raise click.ClickException(
+                    "statistical gating requires a calibration record for this snapshot; "
+                    "run `recall calibrate` first."
+                )
+            parent = m.parent_snapshot
+            if parent is None:
+                console.print("No parent snapshot; nothing to gate against.")
+                return
+            base = store.get_snapshot(parent)
+            ev_base = evaluate(store, base, ds, adapter=None, k_values=ks, mode="replay")
+            calib = CalibrationRecord.from_dict(calib_raw)
+            dr = run_diff(store, base, m, ds, ev_base, ev, epsilon=calib.epsilon,
+                          primary_metric=cfg.gate.get("primary_metric", "recall@5"))
+            try:
+                gres = evaluate_gate(dr, calib, mode="statistical",
+                                     primary_metric=cfg.gate.get("primary_metric", "recall@5"),
+                                     q=float(cfg.gate.get("q", 0.05)), dataset=ds)
+            except GateNotCalibrated as exc:
+                raise click.ClickException(str(exc))
+            verdict = "PASS" if gres.passed else "FAIL"
+            color = "green" if gres.passed else "red"
+            console.print(f"[{color}]Gate {verdict}[/{color}] (statistical)")
+            for reason in gres.reasons:
+                console.print(f"- {reason}")
+            if not gres.passed:
+                sys.exit(1)
+    finally:
+        if adapter is not None:
+            adapter.close()
 
 
 @main.command()
@@ -555,8 +564,11 @@ def calibrate(snap: str, dataset_id: str | None, runs: int, config_path: str) ->
     m = _resolve(store, snap)
     ds = _get_dataset(store, dataset_id)
     adapter = build_adapter(cfg, store)
-    record = run_calibrate(store, m, ds, adapter, n_runs=runs,
-                           primary_metric=cfg.gate.get("primary_metric", "recall@5"))
+    try:
+        record = run_calibrate(store, m, ds, adapter, n_runs=runs,
+                               primary_metric=cfg.gate.get("primary_metric", "recall@5"))
+    finally:
+        adapter.close()
     console.print(f"Calibrated {m.snapshot_id}: epsilon={record.epsilon:.6f}, runs={record.n_runs}")
     table = Table(title="Per-metric std")
     table.add_column("Metric")
@@ -793,8 +805,12 @@ def ci(config_path: str, base: str | None, dataset_id: str | None, out: str) -> 
     parent = None
     if store.list_snapshots():
         parent = store.resolve_snapshot("latest").snapshot_id
-    report = run_ingest(store, source_dir, pipeline, adapter=build_adapter(cfg, store),
-                        parent=parent, provider=provider)
+    vec_adapter = build_adapter(cfg, store)
+    try:
+        report = run_ingest(store, source_dir, pipeline, adapter=vec_adapter,
+                            parent=parent, provider=provider)
+    finally:
+        vec_adapter.close()
     current = report.manifest
     ds = _get_dataset(store, dataset_id)
 
@@ -920,10 +936,13 @@ def phase0(dataset_id: str | None, reruns: int, seed: int, yes: bool,
         cost = estimate_cost(provider, source_dir) * (1 + len(default_changes()))
         _cost_gate(cost, max_cost, yes, "phase-0 real-embedding ingest")
 
-    report = run_phase0(store, source_dir, ds, adapter,
-                        base_config=_pipeline_config(cfg),
-                        provider=provider if real_embeddings else None,
-                        noise_reruns=reruns, seed=seed, cost_usd=cost)
+    try:
+        report = run_phase0(store, source_dir, ds, adapter,
+                            base_config=_pipeline_config(cfg),
+                            provider=provider if real_embeddings else None,
+                            noise_reruns=reruns, seed=seed, cost_usd=cost)
+    finally:
+        adapter.close()
 
     g = report.gates
     table = Table(title=f"Phase-0 validation (§13), {report.provenance['provider']} + "
