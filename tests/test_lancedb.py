@@ -58,6 +58,16 @@ def test_rows_for_upsert_shape() -> None:
                      "payload_json": json.dumps({"doc_id": "d"}, sort_keys=True)}]
 
 
+# -- query_dense on a missing collection (needs lancedb) -----------------------
+
+
+def test_query_dense_missing_collection_raises_keyerror(tmp_path) -> None:
+    pytest.importorskip("lancedb")
+    adapter = ldb.LanceDBAdapter(str(tmp_path / "lancedb"))
+    with pytest.raises(KeyError):
+        adapter.query_dense("never_created", np.zeros(4, dtype=np.float32), top_k=3)
+
+
 # -- behavioral contract (embedded; needs lancedb) -----------------------------
 
 

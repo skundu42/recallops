@@ -8,6 +8,11 @@ the built-in local adapter. Payloads are carried as one JSON column.
 ``lancedb`` is an optional dependency (extra ``[lancedb]``), imported
 lazily so this module always imports cleanly.
 
+``query_dense`` raises ``KeyError`` when the table does not exist yet
+(matching ``LocalIndexAdapter``) rather than returning an empty result,
+so querying before ingest fails loudly instead of looking like a corpus
+with no matches.
+
 Table membership is checked via ``Connection.list_tables()`` rather than
 the older ``table_names()`` - the installed lancedb (0.34) emits a
 ``DeprecationWarning`` from ``table_names()``, and ``list_tables()`` is the
@@ -108,8 +113,10 @@ class LanceDBAdapter(VectorAdapter):
 
     def query_dense(self, collection: str, vector: np.ndarray,
                     top_k: int) -> list[tuple[str, float]]:
-        if top_k <= 0 or collection not in self._table_names():
+        if top_k <= 0:
             return []
+        if collection not in self._table_names():
+            raise KeyError(collection)
         table = self._connect().open_table(collection)
         query = [float(x) for x in np.asarray(vector, dtype=np.float32).reshape(-1)]
         rows = (table.search(query)

@@ -6,6 +6,13 @@ matching the built-in local adapter. Chroma metadata values must be
 scalars, so the engine payload is stored as one JSON field
 (``payload_json``); ``query_dense`` never needs to read it back.
 
+``ensure_collection``/``upsert`` go through ``get_or_create_collection`` (a
+missing collection is expected there), but ``query_dense`` fetches with the
+strict ``get_collection`` and raises ``KeyError`` on a missing collection,
+matching ``LocalIndexAdapter``: silently get-or-creating on a query would
+mask a caller bug (querying before ingest) as an empty result instead of
+failing loudly.
+
 ``hnsw:search_ef`` is pinned high at collection creation so the tiny
 collections used in tests and small projects are effectively exact; HNSW
 approximation at scale is quarantined by funnel shadow scoring (FR-6.2)
@@ -111,7 +118,13 @@ class ChromaAdapter(VectorAdapter):
                     top_k: int) -> list[tuple[str, float]]:
         if top_k <= 0:
             return []
-        col = self._collection(collection)
+        client = self._connect()
+        try:
+            col = client.get_collection(name=collection)
+        except Exception as exc:
+            if _is_missing_collection_error(exc):
+                raise KeyError(collection) from exc
+            raise
         total = int(col.count())
         if total == 0:
             return []

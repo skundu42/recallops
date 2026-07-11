@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+import numpy as np
 import pytest
 from adapter_contract import AdapterContract
 
@@ -68,6 +69,18 @@ def test_missing_collection_error_rejects_unrelated_valueerror() -> None:
 def test_missing_collection_error_rejects_unrelated_runtimeerror() -> None:
     pytest.importorskip("chromadb")
     assert ch._is_missing_collection_error(RuntimeError("file is not a database")) is False
+
+
+# -- query_dense on a missing collection (needs chromadb) ---------------------
+
+
+def test_query_dense_missing_collection_raises_keyerror(tmp_path) -> None:
+    pytest.importorskip("chromadb")
+    adapter = ch.ChromaAdapter(str(tmp_path / "chroma"))
+    with pytest.raises(KeyError):
+        adapter.query_dense("never_created", np.zeros(4, dtype=np.float32), top_k=3)
+    # querying must not silently get-or-create the collection
+    assert adapter._connect().list_collections() == []
 
 
 # -- behavioral contract (embedded; needs chromadb) ---------------------------
