@@ -163,6 +163,66 @@ class LocalHashProvider(EmbeddingProvider):
         return 0.0
 
 
+ST_DEFAULT_MODEL = "all-MiniLM-L6-v2"
+_ST_DEFAULT_DIMS = {"all-MiniLM-L6-v2": 384}
+
+
+class SentenceTransformersProvider(EmbeddingProvider):
+    """Local real-semantics embeddings at $0 via sentence-transformers.
+
+    Device defaults to CPU: GPU kernels are nondeterministic and identical
+    inputs must produce identical vectors for content-addressing.
+    ``revision`` pins the HuggingFace model revision and is recorded in
+    ``params`` (hence the manifest); the default "main" is only
+    reproducible while the upstream model repo does not move, so pin a
+    commit for long-lived baselines.
+    """
+
+    def __init__(self, model: str = ST_DEFAULT_MODEL, dims: int | None = None,
+                 device: str = "cpu", revision: str | None = None):
+        if dims is None:
+            if model not in _ST_DEFAULT_DIMS:
+                raise ValueError(
+                    f"unknown sentence-transformers model {model!r}: pass dims explicitly"
+                )
+            dims = _ST_DEFAULT_DIMS[model]
+        self.provider = "st"
+        self.model = model
+        self.dims = int(dims)
+        self.device = str(device)
+        self.revision = str(revision) if revision else "main"
+        self.params = {"dims": self.dims, "device": self.device, "revision": self.revision}
+        self._model = None
+
+    def _load(self):
+        if self._model is None:
+            try:
+                from sentence_transformers import SentenceTransformer
+            except ImportError as exc:
+                raise ImportError(
+                    "sentence-transformers is not installed; run: pip install 'recallops[st]'"
+                ) from exc
+            self._model = SentenceTransformer(self.model, device=self.device,
+                                              revision=self.revision)
+            got = int(self._model.get_sentence_embedding_dimension())
+            if got != self.dims:
+                raise ValueError(
+                    f"sentence-transformers model {self.model!r} emits {got} dims, "
+                    f"config says {self.dims}"
+                )
+        return self._model
+
+    def embed(self, texts: list[str]) -> np.ndarray:
+        model = self._load()
+        mat = model.encode(list(texts), batch_size=32, convert_to_numpy=True,
+                           normalize_embeddings=True, show_progress_bar=False)
+        mat = np.asarray(mat, dtype=np.float32).reshape(len(texts), self.dims)
+        return _l2_normalize(mat)
+
+    def price_per_1k_tokens(self) -> float:
+        return 0.0
+
+
 class OpenAIProvider(EmbeddingProvider):
     def __init__(self, model: str = "text-embedding-3-small", dims: int | None = None,
                  api_key: str | None = None):
@@ -346,6 +406,12 @@ def get_provider(spec: dict) -> EmbeddingProvider:
         return CohereProvider(model=model, dims=dims)
     if provider == "voyage":
         return VoyageProvider(model=model, dims=dims)
+    if provider == "st":
+        return SentenceTransformersProvider(
+            model=model, dims=dims,
+            device=str(spec.get("device", "cpu")),
+            revision=spec.get("revision"),
+        )
     raise ValueError(f"unknown embedding provider: {provider!r}")
 
 

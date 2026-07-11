@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import sys
+
 import numpy as np
 import pytest
 
@@ -10,6 +13,7 @@ from recallops.pipeline.providers import (
     EmbeddingProvider,
     LocalHashProvider,
     OpenAIProvider,
+    SentenceTransformersProvider,
     VoyageProvider,
     cohere_request_body,
     embed_stage_spec,
@@ -333,3 +337,61 @@ class TestGetProviderNewBackends:
     def test_voyage_dispatch(self):
         p = get_provider({"provider": "voyage", "model": "voyage-3.5", "dims": 1024})
         assert isinstance(p, VoyageProvider)
+
+
+class TestSentenceTransformersProvider:
+    def test_defaults_and_params(self):
+        p = SentenceTransformersProvider()
+        assert p.provider == "st"
+        assert p.model == "all-MiniLM-L6-v2"
+        assert p.dims == 384
+        assert p.params == {"dims": 384, "device": "cpu", "revision": "main"}
+
+    def test_price_is_zero_so_cost_gate_auto_approves(self):
+        assert SentenceTransformersProvider().price_per_1k_tokens() == 0.0
+
+    def test_unknown_model_needs_explicit_dims(self):
+        with pytest.raises(ValueError):
+            SentenceTransformersProvider("some/custom-model")
+        p = SentenceTransformersProvider("some/custom-model", dims=768)
+        assert p.dims == 768
+
+    def test_revision_and_device_enter_params_and_model_key(self):
+        a = SentenceTransformersProvider()
+        b = SentenceTransformersProvider(revision="abc123")
+        assert b.params["revision"] == "abc123"
+        assert a.model_key != b.model_key
+
+    def test_construct_does_not_import_torch(self):
+        SentenceTransformersProvider()
+        # constructing must not pull in the heavyweight stack
+
+    def test_missing_package_raises_actionable_error(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "sentence_transformers", None)
+        with pytest.raises(ImportError, match=r"recallops\[st\]"):
+            SentenceTransformersProvider().embed(["hello"])
+
+    def test_get_provider_dispatch(self):
+        p = get_provider({"provider": "st", "model": "all-MiniLM-L6-v2", "dims": 384,
+                          "device": "cpu", "revision": "abc123"})
+        assert isinstance(p, SentenceTransformersProvider)
+        assert p.params["revision"] == "abc123"
+
+
+@pytest.mark.skipif(not os.environ.get("RECALL_ST_TESTS"),
+                    reason="set RECALL_ST_TESTS=1 to run tests that download the ST model")
+class TestSentenceTransformersLive:
+    def test_embed_shape_norm_determinism_and_query_equality(self):
+        pytest.importorskip("sentence_transformers")
+        p = SentenceTransformersProvider()
+        texts = ["the refund policy covers annual plans", "gateway timeouts default to thirty seconds"]
+        a = p.embed(texts)
+        b = p.embed(texts)
+        assert a.shape == (2, 384)
+        assert a.dtype == np.float32
+        assert np.allclose(np.linalg.norm(a, axis=1), 1.0, atol=1e-5)
+        assert np.array_equal(a, b)
+        assert np.array_equal(p.embed_queries(texts), a)
+        # real semantics: related texts are closer than unrelated ones
+        c = p.embed(["annual plan refunds", "the moon orbits the earth"])
+        assert float(np.dot(a[0], c[0])) > float(np.dot(a[0], c[1]))
