@@ -493,3 +493,35 @@ def test_scorecard_missing_module_is_graceful():
     with runner.isolated_filesystem():
         result = _run(runner, ["scorecard"], code=1)
         assert "not available" in result.output
+
+
+# -- empty-collection warning on live eval -----------------------------------
+
+
+def test_live_eval_warns_on_empty_collection(corpus_dir):
+    from recallops.config import ProjectConfig, build_adapter
+    from recallops.ingest import collection_name
+
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        ds = _bootstrap(runner, str(corpus_dir))
+        store = ProjectStore(".")
+        m = store.resolve_snapshot("latest")
+        adapter = build_adapter(ProjectConfig.load("recall.yaml"), store)
+        name = collection_name(m, store.project)
+        dims = int(m.pipeline.stage("embed").params["dims"])
+        adapter.drop(name)
+        adapter.ensure_collection(name, dims)  # exists but 0 vectors
+        adapter.close()
+
+        result = _run(runner, ["eval", ds, "--live"])
+        assert "0 vectors" in result.output
+        assert "warning" in result.output.lower()
+
+
+def test_live_eval_no_warning_when_collection_populated(corpus_dir):
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        ds = _bootstrap(runner, str(corpus_dir))
+        result = _run(runner, ["eval", ds, "--live"])
+        assert "0 vectors" not in result.output

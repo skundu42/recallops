@@ -166,6 +166,25 @@ def _cost_gate(est_usd: float, max_cost: float | None, yes: bool, label: str) ->
     )
 
 
+def _warn_if_empty_collection(adapter, manifest: SnapshotManifest, store: ProjectStore) -> None:
+    """Live metrics against an empty serving collection are silently all-zero
+    (a wrong DSN/path or an ingest that skipped write-through looks like a
+    catastrophic regression). A MISSING collection already fails loudly at
+    query time, so a count that raises is left to that path."""
+    from .ingest import collection_name
+
+    try:
+        n = adapter.count(collection_name(manifest, store.project))
+    except Exception:
+        return
+    if n == 0:
+        console.print(
+            "[yellow]warning:[/yellow] the serving collection for this snapshot is "
+            "empty (0 vectors); live dense metrics will be zeros. Did ingest "
+            "write through this adapter (check adapter config / DSN / path)?"
+        )
+
+
 def _estimate_ingest_cost(store: ProjectStore, source_dir: Path, pipeline, provider) -> dict:
     from . import hashing
     from .ingest import embedding_keys
@@ -500,6 +519,8 @@ def eval(dataset_id: str | None, snap: str, replay: bool, gate: str | None,
     mode = "replay" if replay else "live"
     adapter = None if replay else build_adapter(cfg, store)
     try:
+        if adapter is not None:
+            _warn_if_empty_collection(adapter, m, store)
         ev = evaluate(store, m, ds, adapter=adapter, k_values=ks, mode=mode)
         console.print(eval_table(ev))
 
@@ -565,6 +586,7 @@ def calibrate(snap: str, dataset_id: str | None, runs: int, config_path: str) ->
     ds = _get_dataset(store, dataset_id)
     adapter = build_adapter(cfg, store)
     try:
+        _warn_if_empty_collection(adapter, m, store)
         record = run_calibrate(store, m, ds, adapter, n_runs=runs,
                                primary_metric=cfg.gate.get("primary_metric", "recall@5"))
     finally:
