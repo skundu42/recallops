@@ -337,8 +337,11 @@ Every module under [`recallops/`](recallops/), one line each. Sub-package
 | Module | Responsibility |
 |---|---|
 | `base.py` | `VectorAdapter` ABC + `Capability` descriptor: the adapter contract (FR-12). |
+| `chroma.py` | `ChromaAdapter`: embedded via `chromadb.PersistentClient`, cosine space (`query_dense` converts distance back to similarity); `ensure_collection`/`upsert` get-or-create, `query_dense` raises `KeyError` on a missing collection. |
+| `lancedb.py` | `LanceDBAdapter`: embedded columnar store, exact flat-scan cosine (no ANN index in v0, nothing to rebuild); `query_dense` raises `KeyError` on a missing table. |
 | `local.py` | `LocalIndexAdapter`: built-in exact-KNN adapter (npz per collection); `ann_mode` noise overlay for calibration / divergence. |
 | `pgvector.py` | `PgVectorAdapter`: pgvector serving index (cosine `<=>`), connection-free SQL builders, tunable ivfflat `probes`. |
+| `qdrant.py` | `QdrantAdapter`: server or embedded local mode, cosine distance; deterministic UUID5 point ids (`point_id_for_chunk`) bridge string chunk ids to Qdrant's id type. |
 
 ### `recallops/pipeline/` (ingestion primitives)
 
@@ -346,7 +349,7 @@ Every module under [`recallops/`](recallops/), one line each. Sub-package
 |---|---|
 | `parsers.py` | Document parsers (`text-v1`, `markdown-v2`) producing parsed text + lineage. |
 | `chunkers.py` | Chunkers (`fixed_token`, `markdown_heading`, `sentence`) producing char-span chunk records (the span invariant that makes fate alignment possible). |
-| `providers.py` | Embedding providers: `LocalHashProvider` ($0 offline feature-hashing), `OpenAIProvider` (real), + cost estimation. |
+| `providers.py` | Embedding providers: `LocalHashProvider` ($0 offline feature-hashing), `SentenceTransformersProvider` ($0 local real-semantics via sentence-transformers), `OpenAIProvider` / `CohereProvider` / `VoyageProvider` (real, raw HTTP); `embed_queries` hook lets a provider embed retrieval queries differently from documents (Cohere/Voyage `input_type`; default: delegates to `embed`); + cost estimation. |
 
 ---
 
@@ -417,12 +420,15 @@ class Capability:
     supports_rebuild: bool
 ```
 
-Both shipped adapters advertise `exposes_dense_scores=True`,
-`exposes_sparse=False`, `supports_rebuild=True`. Because RecallOps computes
-sparse and shadow-dense rankings itself from stored artifacts, an adapter is
-never *required* to expose scores or sparse retrieval for attribution to work;
-the capability descriptor just lets the engine skip its own shadow work when the
-adapter can answer directly.
+All five shipped adapters (`local`, `pgvector`, `qdrant`, `chroma`,
+`lancedb`) advertise `exposes_dense_scores=True` and `exposes_sparse=False`.
+`supports_rebuild=True` only for `local` and `pgvector`, the two with a
+cheap deterministic reseed/rebuild path used by calibration; `qdrant`,
+`chroma`, and `lancedb` advertise `supports_rebuild=False`. Because
+RecallOps computes sparse and shadow-dense rankings itself from stored
+artifacts, an adapter is never *required* to expose scores or sparse
+retrieval for attribution to work; the capability descriptor just lets the
+engine skip its own shadow work when the adapter can answer directly.
 
 ---
 
