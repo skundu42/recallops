@@ -514,3 +514,19 @@ def test_gc_deletes_index_rows_before_files(store: ProjectStore, monkeypatch):
     assert store.missing_embedding_keys(m1_keys) == m1_keys
     assert not store.has_chunkset("cs_m1")
     assert [s.artifacts["embeddings"] for s in store.list_snapshots()] == ["artifacts/emb/m2"]
+
+
+def test_query_vector_cache_persists_across_store_instances(tmp_path):
+    root = tmp_path / "proj"
+    s1 = ProjectStore(root)
+    vec = np.arange(8, dtype=np.float32) / 10.0
+    s1.cache_query_vector("qk_abc", vec)
+    s1.close()
+
+    s2 = ProjectStore(root)  # fresh process simulation: empty in-memory dict
+    got = s2.query_vector_cached("qk_abc")
+    assert got is not None
+    np.testing.assert_array_equal(got, vec)  # fp32 exact, not approximate
+    assert got.dtype == np.float32
+    assert s2.query_vector_cached("qk_missing") is None
+    s2.close()
