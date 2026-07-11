@@ -484,3 +484,72 @@ class TestSentenceTransformersLive:
         # real semantics: related texts are closer than unrelated ones
         c = p.embed(["annual plan refunds", "the moon orbits the earth"])
         assert float(np.dot(a[0], c[0])) > float(np.dot(a[0], c[1]))
+
+
+class TestHttpTimeout:
+    def test_post_json_passes_default_timeout(self, monkeypatch):
+        seen = {}
+
+        class FakeResp:
+            def read(self):
+                return b'{"ok": true}'
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+
+        def fake_urlopen(req, timeout=None):
+            seen["timeout"] = timeout
+            return FakeResp()
+
+        import urllib.request
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.delenv("RECALL_HTTP_TIMEOUT", raising=False)
+        out = providers_module._post_json("https://x.test/v1", {"a": 1}, {})
+        assert out == {"ok": True}
+        assert seen["timeout"] == pytest.approx(60.0)
+
+    def test_post_json_timeout_from_env(self, monkeypatch):
+        seen = {}
+
+        class FakeResp:
+            def read(self):
+                return b"{}"
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+
+        import urllib.request
+        monkeypatch.setattr(urllib.request, "urlopen",
+                            lambda req, timeout=None: seen.update(timeout=timeout) or FakeResp())
+        monkeypatch.setenv("RECALL_HTTP_TIMEOUT", "7.5")
+        providers_module._post_json("https://x.test/v1", {}, {})
+        assert seen["timeout"] == pytest.approx(7.5)
+
+
+class TestOpenAIWireFormat:
+    def test_request_body_and_parse(self):
+        body = providers_module.openai_request_body("text-embedding-3-small", ["a", "b"], 512)
+        assert body == {"model": "text-embedding-3-small", "input": ["a", "b"], "dimensions": 512}
+        payload = {"data": [{"index": 1, "embedding": [0.0, 1.0]},
+                            {"index": 0, "embedding": [1.0, 0.0]}]}
+        assert providers_module.parse_openai_embeddings(payload) == [[1.0, 0.0], [0.0, 1.0]]
+
+    def test_embed_uses_post_json(self, monkeypatch):
+        calls = []
+
+        def fake_post(url, body, headers, timeout=None):
+            calls.append((url, body, headers))
+            return {"data": [{"index": i, "embedding": [1.0] + [0.0] * 511}
+                             for i in range(len(body["input"]))]}
+
+        monkeypatch.setattr(providers_module, "_post_json", fake_post)
+        p = OpenAIProvider("text-embedding-3-small", dims=512, api_key="sk-test")
+        mat = p.embed(["alpha", "beta"])
+        assert mat.shape == (2, 512)
+        assert np.allclose(np.linalg.norm(mat, axis=1), 1.0)
+        (url, body, headers), = calls
+        assert url == providers_module._OPENAI_URL
+        assert headers["Authorization"] == "Bearer sk-test"
+        assert body["dimensions"] == 512

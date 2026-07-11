@@ -2,8 +2,9 @@
 
 ``LocalHashProvider`` is a deterministic, offline feature-hashing embedder, a
 pure function of (text, model params), so every test and demo runs without
-network or cost. ``OpenAIProvider`` is the real-money path; it is lazy and is
-never exercised in tests.
+network or cost. ``OpenAIProvider``, ``CohereProvider``, and ``VoyageProvider``
+are real-money paths; they share the ``_post_json`` path with a bounded timeout
+to prevent CI hangs.
 """
 from __future__ import annotations
 
@@ -129,7 +130,16 @@ def _l2_normalize(mat: np.ndarray) -> np.ndarray:
     return (mat / norms).astype(np.float32)
 
 
-def _post_json(url: str, body: dict, headers: dict) -> dict:
+def _http_timeout() -> float:
+    """Seconds before any provider HTTP call is abandoned (RECALL_HTTP_TIMEOUT
+    overrides). Without a bound, one stalled provider connection hangs an
+    ingest or CI run forever, which breaks the <5-min CI budget (PRD section 12)."""
+    import os
+
+    return float(os.environ.get("RECALL_HTTP_TIMEOUT", "60"))
+
+
+def _post_json(url: str, body: dict, headers: dict, timeout: float | None = None) -> dict:
     import urllib.request
 
     req = urllib.request.Request(
@@ -138,8 +148,16 @@ def _post_json(url: str, body: dict, headers: dict) -> dict:
         headers={"Content-Type": "application/json", **headers},
         method="POST",
     )
-    with urllib.request.urlopen(req) as resp:
+    with urllib.request.urlopen(req, timeout=timeout if timeout is not None else _http_timeout()) as resp:
         return json.loads(resp.read().decode("utf-8"))
+
+
+def openai_request_body(model: str, texts: list[str], dims: int) -> dict:
+    return {"model": model, "input": list(texts), "dimensions": int(dims)}
+
+
+def parse_openai_embeddings(payload: dict) -> list[list[float]]:
+    return [d["embedding"] for d in sorted(payload["data"], key=lambda d: d["index"])]
 
 
 def cohere_request_body(model: str, texts: list[str], input_type: str) -> dict:
@@ -285,22 +303,15 @@ class OpenAIProvider(EmbeddingProvider):
 
     def embed(self, texts: list[str]) -> np.ndarray:
         key = self._key()
-        import json
-        import urllib.request
-
         rows: list[list[float]] = []
         for start in range(0, len(texts), _OPENAI_BATCH):
             batch = texts[start:start + _OPENAI_BATCH]
-            body = json.dumps({"model": self.model, "input": batch, "dimensions": self.dims})
-            req = urllib.request.Request(
+            payload = _post_json(
                 _OPENAI_URL,
-                data=body.encode("utf-8"),
-                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                method="POST",
+                openai_request_body(self.model, batch, self.dims),
+                {"Authorization": f"Bearer {key}"},
             )
-            with urllib.request.urlopen(req) as resp:
-                payload = json.loads(resp.read().decode("utf-8"))
-            rows.extend(d["embedding"] for d in sorted(payload["data"], key=lambda d: d["index"]))
+            rows.extend(parse_openai_embeddings(payload))
         mat = np.array(rows, dtype=np.float32).reshape(len(texts), self.dims)
         return _l2_normalize(mat)
 
