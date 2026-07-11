@@ -530,3 +530,19 @@ def test_query_vector_cache_persists_across_store_instances(tmp_path):
     assert got.dtype == np.float32
     assert s2.query_vector_cached("qk_missing") is None
     s2.close()
+
+
+def test_pins_persist_across_store_instances(tmp_path):
+    root = tmp_path / "proj"
+    s1 = ProjectStore(root)
+    assert s1.pinned_snapshots() == set()
+    s1.pin_snapshot("snap_aaa")
+    s1.pin_snapshot("snap_bbb")
+    s1.pin_snapshot("snap_aaa")  # idempotent
+    s1.close()
+    s2 = ProjectStore(root)
+    assert s2.pinned_snapshots() == {"snap_aaa", "snap_bbb"}
+    s2.unpin_snapshot("snap_aaa")
+    s2.unpin_snapshot("snap_never_pinned")  # no-op, no raise
+    assert s2.pinned_snapshots() == {"snap_bbb"}
+    s2.close()

@@ -384,9 +384,12 @@ def snapshot_list() -> None:
     table.add_column("Parent")
     table.add_column("Docs", justify="right")
     table.add_column("Chunks", justify="right")
+    table.add_column("Pinned")
+    pins = store.pinned_snapshots()
     for m in snaps:
         table.add_row(m.snapshot_id, m.parent_snapshot or "-",
-                      str(m.corpus.doc_count), str(m.corpus.chunk_count))
+                      str(m.corpus.doc_count), str(m.corpus.chunk_count),
+                      "*" if m.snapshot_id in pins else "-")
     console.print(table)
 
 
@@ -396,6 +399,26 @@ def snapshot_show(snap: str) -> None:
     store = _store()
     m = _resolve(store, snap)
     console.print_json(json.dumps(m.to_dict()))
+
+
+@snapshot.command("pin")
+@click.argument("snap")
+def snapshot_pin(snap: str) -> None:
+    """Pin a snapshot so `recall gc` never removes it."""
+    store = _store()
+    m = _resolve(store, snap)
+    store.pin_snapshot(m.snapshot_id)
+    console.print(f"Pinned [bold]{m.snapshot_id}[/bold].")
+
+
+@snapshot.command("unpin")
+@click.argument("snap")
+def snapshot_unpin(snap: str) -> None:
+    """Remove a pin (the snapshot becomes eligible for gc again)."""
+    store = _store()
+    m = _resolve(store, snap)
+    store.unpin_snapshot(m.snapshot_id)
+    console.print(f"Unpinned [bold]{m.snapshot_id}[/bold].")
 
 
 @main.group()
@@ -915,10 +938,12 @@ def report(diff_id: str, fmt: str, out: str | None) -> None:
 def gc(keep: int) -> None:
     """Garbage-collect old snapshots' artifacts."""
     store = _store()
-    result = store.gc(keep_last=keep)
+    pinned = store.pinned_snapshots()
+    result = store.gc(keep_last=keep, pinned=pinned)
     console.print(
         f"Removed {result['removed_chunksets']} chunkset(s), "
-        f"{result['removed_emb_files']} embedding file(s)."
+        f"{result['removed_emb_files']} embedding file(s); "
+        f"{len(pinned)} pinned snapshot(s) kept."
     )
 
 

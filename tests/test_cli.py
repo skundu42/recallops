@@ -396,6 +396,26 @@ def test_gc_runs(corpus_dir):
         assert "Removed" in result.output
 
 
+def test_snapshot_pin_survives_gc(corpus_dir):
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        _bootstrap(runner, str(corpus_dir))
+        first = _latest_snapshot()
+        # two more snapshots so keep-last-1 would evict `first` without a pin
+        for params in ('{"max_tokens": 40, "overlap": 0}', '{"max_tokens": 50, "overlap": 0}'):
+            _run(runner, ["ingest", "--chunker", FIXED_TOKEN, "--chunk-params", params])
+        _run(runner, ["snapshot", "pin", first])
+        _run(runner, ["gc", "--keep", "1"])
+        remaining = {m.snapshot_id for m in ProjectStore(".").list_snapshots()}
+        assert first in remaining
+        assert len(remaining) == 2  # pinned + latest
+
+        _run(runner, ["snapshot", "unpin", first])
+        _run(runner, ["gc", "--keep", "1"])
+        remaining = {m.snapshot_id for m in ProjectStore(".").list_snapshots()}
+        assert first not in remaining
+
+
 # -- sweeps / migration / drift ----------------------------------------------
 
 

@@ -171,6 +171,22 @@ class ProjectStore:
         row = self._conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
         return row["value"] if row else None
 
+    # -- pins (FR-1.8: gc keeps last N + pinned) --------------------------------
+
+    def pinned_snapshots(self) -> set[str]:
+        raw = self.get_meta("pinned_snapshots")
+        return set(json.loads(raw)) if raw else set()
+
+    def pin_snapshot(self, snapshot_id: str) -> None:
+        pins = self.pinned_snapshots()
+        pins.add(snapshot_id)
+        self.set_meta("pinned_snapshots", json.dumps(sorted(pins)))
+
+    def unpin_snapshot(self, snapshot_id: str) -> None:
+        pins = self.pinned_snapshots()
+        pins.discard(snapshot_id)
+        self.set_meta("pinned_snapshots", json.dumps(sorted(pins)))
+
     def close(self) -> None:
         self._conn.close()
 
