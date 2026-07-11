@@ -300,6 +300,27 @@ class TestVoyageProvider:
         assert seen[0]["input_type"] == "query"
         assert seen[1]["input_type"] == "document"
 
+    def test_embed_normalizes_and_authorizes(self, monkeypatch):
+        seen = []
+
+        def fake_post(url, body, headers):
+            seen.append((url, body, headers))
+            return {"data": [{"index": i, "embedding": [3.0, 4.0] + [0.0] * 1022}
+                             for i in range(len(body["input"]))]}
+
+        monkeypatch.setattr(providers_module, "_post_json", fake_post)
+        monkeypatch.setenv("VOYAGE_API_KEY", "test-key")
+        p = VoyageProvider()
+        mat = p.embed(["x", "y"])
+        assert mat.shape == (2, 1024)
+        assert np.allclose(np.linalg.norm(mat, axis=1), 1.0, atol=1e-5)
+        assert seen[0][1]["input_type"] == "document"
+        assert seen[0][2]["Authorization"] == "Bearer test-key"
+
+    def test_model_key_shape(self):
+        p = VoyageProvider()
+        assert p.model_key == f"voyage_voyage-3.5_1024_{hashing.params_hash(p.params)}"
+
     def test_price_positive_so_cost_gate_engages(self):
         assert VoyageProvider().price_per_1k_tokens() > 0.0
 
