@@ -3,14 +3,21 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+import recallops.pipeline.providers as providers_module
 from recallops import hashing
 from recallops.pipeline.providers import (
+    CohereProvider,
     EmbeddingProvider,
     LocalHashProvider,
     OpenAIProvider,
+    VoyageProvider,
+    cohere_request_body,
     embed_stage_spec,
     estimate_embed_cost,
     get_provider,
+    parse_cohere_embeddings,
+    parse_voyage_embeddings,
+    voyage_request_body,
 )
 
 
@@ -151,7 +158,7 @@ class TestStageSpecAndFactory:
 
     def test_get_provider_unknown_raises(self):
         with pytest.raises(ValueError):
-            get_provider({"provider": "cohere", "model": "embed-v3", "dims": 512})
+            get_provider({"provider": "nonexistent", "model": "m", "dims": 512})
 
 
 class TestEstimateEmbedCost:
@@ -192,3 +199,116 @@ class TestEmbedQueries:
 
         p = Asymmetric()
         assert np.array_equal(p.embed_queries(["q"]), -p.embed(["q"]))
+
+
+class TestCohereProvider:
+    def test_request_body_documents(self):
+        body = cohere_request_body("embed-english-v3.0", ["a", "b"], "search_document")
+        assert body == {"model": "embed-english-v3.0", "texts": ["a", "b"],
+                        "input_type": "search_document", "embedding_types": ["float"]}
+
+    def test_parse_embeddings(self):
+        payload = {"embeddings": {"float": [[1.0, 0.0], [0.0, 1.0]]}}
+        assert parse_cohere_embeddings(payload) == [[1.0, 0.0], [0.0, 1.0]]
+
+    def test_unknown_model_rejected(self):
+        with pytest.raises(ValueError):
+            CohereProvider("embed-english-v99")
+
+    def test_dims_must_match_model(self):
+        with pytest.raises(ValueError):
+            CohereProvider("embed-english-v3.0", dims=512)
+        assert CohereProvider("embed-english-v3.0", dims=1024).dims == 1024
+
+    def test_embed_without_key_raises_before_network(self, monkeypatch):
+        monkeypatch.delenv("COHERE_API_KEY", raising=False)
+        with pytest.raises(RuntimeError):
+            CohereProvider().embed(["hello"])
+
+    def test_embed_uses_document_input_type_and_normalizes(self, monkeypatch):
+        seen = []
+
+        def fake_post(url, body, headers):
+            seen.append((url, body, headers))
+            return {"embeddings": {"float": [[3.0, 4.0] + [0.0] * 1022
+                                             for _ in body["texts"]]}}
+
+        monkeypatch.setattr(providers_module, "_post_json", fake_post)
+        monkeypatch.setenv("COHERE_API_KEY", "test-key")
+        p = CohereProvider()
+        mat = p.embed(["x", "y"])
+        assert mat.shape == (2, 1024)
+        assert np.allclose(np.linalg.norm(mat, axis=1), 1.0, atol=1e-5)
+        assert seen[0][1]["input_type"] == "search_document"
+        assert seen[0][2]["Authorization"] == "Bearer test-key"
+
+    def test_embed_queries_uses_query_input_type(self, monkeypatch):
+        seen = []
+
+        def fake_post(url, body, headers):
+            seen.append(body)
+            return {"embeddings": {"float": [[1.0] + [0.0] * 1023
+                                             for _ in body["texts"]]}}
+
+        monkeypatch.setattr(providers_module, "_post_json", fake_post)
+        monkeypatch.setenv("COHERE_API_KEY", "test-key")
+        CohereProvider().embed_queries(["what is x?"])
+        assert seen[0]["input_type"] == "search_query"
+
+    def test_price_positive_so_cost_gate_engages(self):
+        assert CohereProvider().price_per_1k_tokens() > 0.0
+
+    def test_model_key_shape(self):
+        p = CohereProvider()
+        assert p.model_key == (
+            f"cohere_embed-english-v3.0_1024_{hashing.params_hash(p.params)}"
+        )
+
+
+class TestVoyageProvider:
+    def test_request_body(self):
+        body = voyage_request_body("voyage-3.5", ["a"], "document")
+        assert body == {"model": "voyage-3.5", "input": ["a"], "input_type": "document"}
+
+    def test_parse_embeddings_sorts_by_index(self):
+        payload = {"data": [{"index": 1, "embedding": [0.0, 1.0]},
+                            {"index": 0, "embedding": [1.0, 0.0]}]}
+        assert parse_voyage_embeddings(payload) == [[1.0, 0.0], [0.0, 1.0]]
+
+    def test_unknown_model_rejected(self):
+        with pytest.raises(ValueError):
+            VoyageProvider("voyage-99")
+
+    def test_embed_without_key_raises_before_network(self, monkeypatch):
+        monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+        with pytest.raises(RuntimeError):
+            VoyageProvider().embed(["hello"])
+
+    def test_embed_queries_uses_query_input_type(self, monkeypatch):
+        seen = []
+
+        def fake_post(url, body, headers):
+            seen.append(body)
+            return {"data": [{"index": i, "embedding": [1.0] + [0.0] * 1023}
+                             for i in range(len(body["input"]))]}
+
+        monkeypatch.setattr(providers_module, "_post_json", fake_post)
+        monkeypatch.setenv("VOYAGE_API_KEY", "test-key")
+        p = VoyageProvider()
+        p.embed_queries(["q"])
+        p.embed(["d"])
+        assert seen[0]["input_type"] == "query"
+        assert seen[1]["input_type"] == "document"
+
+    def test_price_positive_so_cost_gate_engages(self):
+        assert VoyageProvider().price_per_1k_tokens() > 0.0
+
+
+class TestGetProviderNewBackends:
+    def test_cohere_dispatch(self):
+        p = get_provider({"provider": "cohere", "model": "embed-english-v3.0", "dims": 1024})
+        assert isinstance(p, CohereProvider)
+
+    def test_voyage_dispatch(self):
+        p = get_provider({"provider": "voyage", "model": "voyage-3.5", "dims": 1024})
+        assert isinstance(p, VoyageProvider)
