@@ -48,6 +48,28 @@ def test_payload_metadata_is_scalar_valued_json() -> None:
     assert json.loads(meta["payload_json"]) == {"doc_id": "d", "ordinal": 3}
 
 
+# -- missing-collection detection (typed check; needs chromadb) ---------------
+
+
+def test_missing_collection_error_uses_typed_notfounderror() -> None:
+    pytest.importorskip("chromadb")
+    from chromadb.errors import NotFoundError
+
+    assert ch._is_missing_collection_error(NotFoundError("Collection x does not exist")) is True
+
+
+def test_missing_collection_error_rejects_unrelated_valueerror() -> None:
+    # Regression: a ValueError whose wording happens to contain "not found"
+    # must not be silently swallowed as a missing collection.
+    pytest.importorskip("chromadb")
+    assert ch._is_missing_collection_error(ValueError("embedding function not found")) is False
+
+
+def test_missing_collection_error_rejects_unrelated_runtimeerror() -> None:
+    pytest.importorskip("chromadb")
+    assert ch._is_missing_collection_error(RuntimeError("file is not a database")) is False
+
+
 # -- behavioral contract (embedded; needs chromadb) ---------------------------
 
 

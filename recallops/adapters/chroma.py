@@ -35,8 +35,23 @@ def payload_metadata(payload: dict) -> dict:
 
 
 def _is_missing_collection_error(exc: Exception) -> bool:
-    text = str(exc).lower()
-    return "does not exist" in text or "not found" in text
+    """True iff ``exc`` signals that a collection does not exist.
+
+    Primary check is the typed ``chromadb.errors.NotFoundError``, imported
+    lazily so this module keeps importing cleanly without chromadb
+    installed. The substring heuristic is only a fallback for when that
+    import itself fails (chromadb absent, or its errors module moved) -
+    when chromadb is installed and the typed exception is importable, it is
+    the *only* check used, so an unrelated error (e.g. a plain ValueError
+    that happens to mention "not found") can never be misclassified as a
+    missing collection.
+    """
+    try:
+        from chromadb.errors import NotFoundError
+    except ImportError:
+        text = str(exc).lower()
+        return "does not exist" in text or "not found" in text
+    return isinstance(exc, NotFoundError)
 
 
 class ChromaAdapter(VectorAdapter):
