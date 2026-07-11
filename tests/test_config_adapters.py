@@ -5,6 +5,7 @@ tests run without any extras installed.
 """
 from __future__ import annotations
 
+import click
 import pytest
 from click.testing import CliRunner
 
@@ -83,3 +84,43 @@ def test_init_accepts_new_adapter_types(tmp_path, monkeypatch, adapter_type):
     assert result.exit_code == 0, result.output
     cfg = ProjectConfig.load("recall.yaml")
     assert cfg.adapter["type"] == adapter_type
+
+
+def test_phase0_closes_adapter_when_setup_fails(tmp_path, monkeypatch):
+    """The adapter must be closed even if provider resolution or the cost
+    gate raises after build_adapter (regression: qdrant embedded mode would
+    leak its filesystem lock).
+
+    build_pipeline() shallow-merges each config section over DEFAULT_CONFIG
+    (see ingest._section), so simply removing the "embedding" key from
+    cfg.pipeline does not reproduce a missing-embed-stage failure -- the
+    default embedding config fills the gap and _provider_for succeeds. To
+    exercise the exact failure Finding 1 describes (a click.ClickException
+    raised by _provider_for, between adapter construction and the
+    try/finally), this monkeypatches _provider_for directly. _get_dataset is
+    also stubbed so the test doesn't need a real corpus/snapshot/dataset --
+    phase0 fails before `ds` is ever used.
+    """
+    import recallops.cli as cli_module
+
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    assert runner.invoke(main, ["init", "--source", "docs"]).exit_code == 0
+
+    closed = []
+
+    class SpyAdapter:
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(cli_module, "_get_dataset", lambda store, dataset_id: object())
+    monkeypatch.setattr(cli_module, "build_adapter", lambda cfg, store: SpyAdapter())
+
+    def _boom(pipeline):
+        raise click.ClickException("pipeline has no embed stage")
+
+    monkeypatch.setattr(cli_module, "_provider_for", _boom)
+
+    result = runner.invoke(main, ["phase0"])
+    assert result.exit_code != 0
+    assert closed == [True]

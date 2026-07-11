@@ -927,16 +927,16 @@ def phase0(dataset_id: str | None, reruns: int, seed: int, yes: bool,
     ds = _get_dataset(store, dataset_id)
     source_dir = Path(cfg.source)
     adapter = build_adapter(cfg, store)
-    provider = _provider_for(build_pipeline(_pipeline_config(cfg)))
-    real_embeddings = provider.price_per_1k_tokens() > 0.0
-
-    cost = 0.0
-    if real_embeddings:
-        # baseline ingest + one re-ingest per known-cause change
-        cost = estimate_cost(provider, source_dir) * (1 + len(default_changes()))
-        _cost_gate(cost, max_cost, yes, "phase-0 real-embedding ingest")
-
     try:
+        provider = _provider_for(build_pipeline(_pipeline_config(cfg)))
+        real_embeddings = provider.price_per_1k_tokens() > 0.0
+
+        cost = 0.0
+        if real_embeddings:
+            # baseline ingest + one re-ingest per known-cause change
+            cost = estimate_cost(provider, source_dir) * (1 + len(default_changes()))
+            _cost_gate(cost, max_cost, yes, "phase-0 real-embedding ingest")
+
         report = run_phase0(store, source_dir, ds, adapter,
                             base_config=_pipeline_config(cfg),
                             provider=provider if real_embeddings else None,
