@@ -64,6 +64,39 @@ _VOYAGE_URL = "https://api.voyageai.com/v1/embeddings"
 # against docs.voyageai.com/docs/embeddings, 2026-07); the brief's draft
 # value of 128 was overly conservative and has been corrected here.
 _VOYAGE_BATCH = 1000
+# Per-request TOKEN caps also apply and are model-specific (docs.voyageai.com
+# /docs/embeddings, 2026-07): 320K tokens for voyage-3.5, 120K for
+# voyage-3-large, 1M for voyage-3.5-lite. Default chunks run up to ~800
+# tokens, so a full 1,000-text batch can be ~800K tokens - well over the
+# tightest (voyage-3-large) cap. 100K keeps every batch under that cap with
+# a conservative margin, regardless of which Voyage model is in use.
+_VOYAGE_TOKEN_BUDGET = 100_000
+
+
+def _voyage_batches(texts: list[str]) -> list[list[str]]:
+    """Greedily group ``texts`` into Voyage request batches, flushing the
+    current batch when the next text would push it over the 1,000-text
+    count cap OR the estimated-token budget (whichever comes first). A
+    single text whose own estimate already exceeds the token budget is
+    sent alone rather than blocking forever. Token estimate matches
+    ``estimate_embed_cost``: ``len(text) // 4``.
+    """
+    batches: list[list[str]] = []
+    current: list[str] = []
+    current_tokens = 0
+    for text in texts:
+        est = len(text) // 4
+        if current and (
+            len(current) >= _VOYAGE_BATCH or current_tokens + est > _VOYAGE_TOKEN_BUDGET
+        ):
+            batches.append(current)
+            current = []
+            current_tokens = 0
+        current.append(text)
+        current_tokens += est
+    if current:
+        batches.append(current)
+    return batches
 
 
 class EmbeddingProvider(ABC):
@@ -366,8 +399,7 @@ class VoyageProvider(EmbeddingProvider):
     def _embed_as(self, texts: list[str], input_type: str) -> np.ndarray:
         key = self._key()
         rows: list[list[float]] = []
-        for start in range(0, len(texts), _VOYAGE_BATCH):
-            batch = texts[start:start + _VOYAGE_BATCH]
+        for batch in _voyage_batches(list(texts)):
             payload = _post_json(
                 _VOYAGE_URL,
                 voyage_request_body(self.model, batch, input_type),

@@ -329,6 +329,72 @@ class TestVoyageProvider:
     def test_price_positive_so_cost_gate_engages(self):
         assert VoyageProvider().price_per_1k_tokens() > 0.0
 
+    @staticmethod
+    def _fake_post_indexed(calls: list[int]):
+        """Return a ``_post_json`` fake: records the per-request text count
+        and hands back an index-keyed, one-hot embedding per text so the
+        concatenated result's order can be checked against the input order
+        (a one-hot vector is unchanged by L2 normalization)."""
+        import zlib
+
+        def fake_post(url, body, headers):
+            texts = body["input"]
+            calls.append(len(texts))
+            data = []
+            for i, t in enumerate(texts):
+                pos = zlib.crc32(t.encode("utf-8")) % 1024
+                vec = [0.0] * 1024
+                vec[pos] = 1.0
+                data.append({"index": i, "embedding": vec})
+            return {"data": data}
+
+        return fake_post
+
+    def test_batches_split_on_token_budget_not_just_text_count(self, monkeypatch):
+        # Three texts of ~200,000 chars (~50,000 est tokens each, len//4) -
+        # two of them alone already hit the 100,000-token batch budget, so
+        # they must not be crammed into a single 1,000-text batch.
+        calls: list[int] = []
+        monkeypatch.setattr(providers_module, "_post_json", self._fake_post_indexed(calls))
+        monkeypatch.setenv("VOYAGE_API_KEY", "test-key")
+        p = VoyageProvider()
+        texts = ["x" * 200_000, "y" * 200_000, "z" * 200_000]
+        mat = p.embed(texts)
+        assert calls == [2, 1]
+        assert mat.shape == (3, 1024)
+        import zlib
+
+        for i, t in enumerate(texts):
+            pos = zlib.crc32(t.encode("utf-8")) % 1024
+            assert mat[i, pos] == pytest.approx(1.0)
+
+    def test_batches_still_split_on_1000_text_count_cap(self, monkeypatch):
+        calls: list[int] = []
+        monkeypatch.setattr(providers_module, "_post_json", self._fake_post_indexed(calls))
+        monkeypatch.setenv("VOYAGE_API_KEY", "test-key")
+        p = VoyageProvider()
+        texts = [f"tiny-{i}" for i in range(1001)]
+        mat = p.embed(texts)
+        assert calls == [1000, 1]
+        assert mat.shape == (1001, 1024)
+        import zlib
+
+        for i, t in enumerate(texts):
+            pos = zlib.crc32(t.encode("utf-8")) % 1024
+            assert mat[i, pos] == pytest.approx(1.0)
+
+    def test_single_text_over_token_budget_is_sent_alone(self, monkeypatch):
+        # ~125,000 est tokens (500,000 chars // 4), over the 100,000 budget:
+        # must go out as its own request rather than raise or get dropped.
+        calls: list[int] = []
+        monkeypatch.setattr(providers_module, "_post_json", self._fake_post_indexed(calls))
+        monkeypatch.setenv("VOYAGE_API_KEY", "test-key")
+        p = VoyageProvider()
+        texts = ["w" * 500_000]
+        mat = p.embed(texts)
+        assert calls == [1]
+        assert mat.shape == (1, 1024)
+
 
 class TestGetProviderNewBackends:
     def test_cohere_dispatch(self):
