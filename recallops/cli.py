@@ -518,7 +518,9 @@ def dataset_show(dataset_id: str) -> None:
 @click.argument("dataset_id")
 @click.option("--accept", default="", help="Comma-separated case ids to accept.")
 @click.option("--reject", default="", help="Comma-separated case ids to reject.")
-def dataset_curate(dataset_id: str, accept: str, reject: str) -> None:
+@click.option("--edit-file", "edit_file", default=None,
+              help="JSONL of edits: one {\"id\": ..., \"question\"|\"expected_sources\"|\"tags\": ...} per line.")
+def dataset_curate(dataset_id: str, accept: str, reject: str, edit_file: str | None) -> None:
     store = _store()
     try:
         ds = store.get_dataset(dataset_id)
@@ -529,7 +531,21 @@ def dataset_curate(dataset_id: str, accept: str, reject: str) -> None:
         decisions[cid] = "accept"
     for cid in (c.strip() for c in reject.split(",") if c.strip()):
         decisions[cid] = "reject"
-    curated = ds_curate(ds, decisions)
+    edits: dict[str, dict] = {}
+    if edit_file:
+        for line in Path(edit_file).read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            rec = json.loads(line)
+            try:
+                case_id = rec.pop("id")
+            except KeyError:
+                raise click.ClickException(f"edit record missing 'id': {line!r}")
+            edits[case_id] = rec
+    try:
+        curated = ds_curate(ds, decisions, edits=edits)
+    except ValueError as exc:
+        raise click.ClickException(str(exc))
     store.save_dataset(curated)
     console.print(f"[bold]{curated.dataset_id}[/bold]: {len(curated.cases)} cases after curation")
 

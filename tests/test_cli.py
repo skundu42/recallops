@@ -370,6 +370,19 @@ def test_dataset_list_show_curate(corpus_dir):
         assert ProjectStore(".").get_dataset(ds_id).case("q_000") is None
 
 
+def test_dataset_curate_edit_file(corpus_dir):
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        ds = _bootstrap(runner, str(corpus_dir), n=5)
+        case_id = ProjectStore(".").get_dataset(ds).cases[0].id
+        Path("edits.jsonl").write_text(
+            json.dumps({"id": case_id, "question": "An edited question?"}) + "\n",
+            encoding="utf-8",
+        )
+        _run(runner, ["dataset", "curate", ds, "--edit-file", "edits.jsonl"])
+        assert ProjectStore(".").get_dataset(ds).case(case_id).question == "An edited question?"
+
+
 def test_dataset_import_and_mine(corpus_dir):
     runner = CliRunner()
     with runner.isolated_filesystem():
