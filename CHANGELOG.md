@@ -9,11 +9,6 @@ changes; these will always be called out under **Changed** or **Removed**.
 
 ## [Unreleased]
 
-_Nothing yet. Add user-facing changes here under the appropriate heading
-(`Added`, `Changed`, `Fixed`, `Removed`, `Deprecated`, `Security`)._
-
-## 0.2.0 (unreleased)
-
 ### Added
 - Qdrant adapter (`recallops[qdrant]`): server or embedded local mode.
 - Chroma adapter (`recallops[chroma]`): embedded.
