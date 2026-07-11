@@ -545,3 +545,36 @@ def test_live_eval_no_warning_when_collection_populated(corpus_dir):
         ds = _bootstrap(runner, str(corpus_dir))
         result = _run(runner, ["eval", ds, "--live"])
         assert "0 vectors" not in result.output
+
+
+# -- LLM-backed dataset generation ---------------------------------------------
+
+
+def test_dataset_generate_llm_path(corpus_dir, monkeypatch):
+    from recallops import llm as llm_module
+
+    def fake_post(url, body, headers, timeout=None):
+        prompt = body["messages"][0]["content"]
+        # unique per prompt so the generator's dedup keeps them all
+        return {"choices": [{"message": {"content": f"What is covered by: {prompt[-48:]}?"}}]}
+
+    monkeypatch.setattr(llm_module, "_post_json", fake_post)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        _bootstrap(runner, str(corpus_dir), n=5)
+
+        # billed operation without approval: the cost gate must block
+        result = runner.invoke(main, ["dataset", "generate", "--n", "3",
+                                      "--llm", "openai", "--name", "lgold"])
+        assert result.exit_code != 0
+        assert "requires approval" in result.output
+
+        result = _run(runner, ["dataset", "generate", "--n", "3", "--llm", "openai",
+                               "--name", "lgold", "--yes"])
+        assert "lgold-v1" in result.output
+        ds = ProjectStore(".").get_dataset("lgold-v1")
+        assert len(ds.cases) == 3
+        assert all(c.question.startswith("What is covered by:") for c in ds.cases)
+        assert all(c.origin == "synthetic" for c in ds.cases)

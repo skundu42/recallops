@@ -431,11 +431,28 @@ def dataset() -> None:
 @click.option("--seed", default=0)
 @click.option("--name", default="golden")
 @click.option("--snapshot", "snap", default="latest")
-@click.option("--yes", is_flag=True, help="Approve LLM generation cost (unused offline).")
-def dataset_generate(n: int, seed: int, name: str, snap: str, yes: bool) -> None:
+@click.option("--llm", "llm_spec", default=None,
+              help="Generate questions with an LLM, e.g. 'openai' or 'openai:gpt-4o-mini' "
+                   "(uses OPENAI_API_KEY; cost-gated). Default: offline heuristic, $0.")
+@click.option("--yes", is_flag=True, help="Approve the LLM generation cost.")
+@click.option("--max-cost", type=float, default=None, help="LLM cost budget in USD.")
+def dataset_generate(n: int, seed: int, name: str, snap: str, llm_spec: str | None,
+                     yes: bool, max_cost: float | None) -> None:
     store = _store()
     m = _resolve(store, snap)
-    ds = ds_generate(store, m, n=n, seed=seed, name=name)
+    llm = None
+    if llm_spec:
+        from .llm import estimate_generation_cost, get_llm
+
+        try:
+            llm = get_llm(llm_spec)
+        except ValueError as exc:
+            raise click.ClickException(str(exc))
+        records = RetrievalEngine(store, m).chunks()
+        avg_tokens = (sum(len(r.text) // 4 for r in records) / len(records)) if records else 0.0
+        est = estimate_generation_cost(llm.model, n, avg_tokens)
+        _cost_gate(est, max_cost, yes, "LLM dataset generation")
+    ds = ds_generate(store, m, n=n, seed=seed, name=name, llm=llm)
     store.save_dataset(ds)
     console.print(f"[bold]{ds.dataset_id}[/bold]: {len(ds.cases)} cases")
     strat = stratification_report(ds)
