@@ -202,14 +202,22 @@ class SentenceTransformersProvider(EmbeddingProvider):
                 raise ImportError(
                     "sentence-transformers is not installed; run: pip install 'recallops[st]'"
                 ) from exc
-            self._model = SentenceTransformer(self.model, device=self.device,
-                                              revision=self.revision)
-            got = int(self._model.get_sentence_embedding_dimension())
+            model = SentenceTransformer(self.model, device=self.device,
+                                        revision=self.revision)
+            # get_sentence_embedding_dimension was renamed to
+            # get_embedding_dimension in sentence-transformers 5.x; prefer the
+            # new name when present and fall back to the old one so both
+            # pre- and post-rename releases work without a FutureWarning.
+            dims_getter = getattr(model, "get_embedding_dimension", None)
+            if dims_getter is None:
+                dims_getter = model.get_sentence_embedding_dimension
+            got = int(dims_getter())
             if got != self.dims:
                 raise ValueError(
                     f"sentence-transformers model {self.model!r} emits {got} dims, "
                     f"config says {self.dims}"
                 )
+            self._model = model
         return self._model
 
     def embed(self, texts: list[str]) -> np.ndarray:

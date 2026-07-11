@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+import types
 
 import numpy as np
 import pytest
@@ -370,6 +371,28 @@ class TestSentenceTransformersProvider:
         monkeypatch.setitem(sys.modules, "sentence_transformers", None)
         with pytest.raises(ImportError, match=r"recallops\[st\]"):
             SentenceTransformersProvider().embed(["hello"])
+
+    def test_dims_mismatch_raises_consistently_on_retry(self, monkeypatch):
+        class FakeModel:
+            def get_embedding_dimension(self):
+                return 999
+
+            def encode(self, *a, **k):
+                raise AssertionError("encode must not be reached on dims mismatch")
+
+        class FakeST:
+            def __init__(self, *a, **k):
+                pass
+
+        fake = types.ModuleType("sentence_transformers")
+        fake.SentenceTransformer = lambda *a, **k: FakeModel()
+        monkeypatch.setitem(sys.modules, "sentence_transformers", fake)
+        p = SentenceTransformersProvider()  # expects 384
+        with pytest.raises(ValueError, match="999"):
+            p.embed(["x"])
+        with pytest.raises(ValueError, match="999"):
+            p.embed(["x"])  # second call must raise the SAME clear error, not a reshape error
+        assert p._model is None
 
     def test_get_provider_dispatch(self):
         p = get_provider({"provider": "st", "model": "all-MiniLM-L6-v2", "dims": 384,
