@@ -42,3 +42,6 @@ _internal/
 .idea/
 .vscode/
 *.swp
+
+# superpowers session scratch (progress ledger)
+.superpowers/
