@@ -49,4 +49,8 @@ def test_quickstart_flow_through_adapter(adapter_type, module, corpus_dir):
         _run(runner, ["eval", "gold-v1", "--snapshot", snap_b])
 
         result = _run(runner, ["diff", snap_a, snap_b, "--dataset", "gold-v1"])
-        assert snap_b[:8] in result.output or "diff" in result.output.lower()
+        assert "diff_id:" in result.output
+        stored_diffs = ProjectStore(".").list_json("diff")
+        assert stored_diffs, "diff was printed but never persisted to the store"
+        printed_id = result.output.split("diff_id:")[1].split()[0].strip()
+        assert printed_id in stored_diffs
