@@ -5,7 +5,6 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python 3.11 to 3.13](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue.svg)](https://www.python.org/downloads/)
 [![CI](https://github.com/skundu42/recallops/actions/workflows/ci.yml/badge.svg)](https://github.com/skundu42/recallops/actions/workflows/ci.yml)
-[![PyPI](https://img.shields.io/pypi/v/recallops.svg)](https://pypi.org/project/recallops/)
 
 Teams change embedding models, chunkers, parsers, hybrid-search weights, rerankers,
 and source documents constantly. Any of these can silently degrade retrieval, and
@@ -61,11 +60,6 @@ regression apart from ANN index noise, which a serving-side tool cannot.
 ```bash
 pip install recallops
 ```
-
-> **Name note:** the distribution is `recallops` (the name `recallkit` was already taken
-> on PyPI). The **import** name is also `recallops` and the console script is `recall`.
-> Pin a version for reproducible installs, e.g. `pip install "recallops==0.1.0"`.
-
 The default stack (local hash embeddings + built-in exact-KNN adapter) runs fully
 **offline at $0**, no API keys, no server. Every other adapter and embedding
 provider ships as an opt-in extra:
