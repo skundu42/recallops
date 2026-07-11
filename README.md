@@ -44,7 +44,12 @@ regression apart from ANN index noise, which a serving-side tool cannot.
 - **Verified root-cause attribution** for chunker, parser, fusion-weight, reranker, and corpus-drift changes.
 - **Content-addressed snapshots**: identical inputs produce byte-identical manifests and reproducible ids.
 - **Offline by default at $0**: local hash embeddings + a built-in exact-KNN adapter; no keys, no server.
-- **pgvector adapter** (opt-in) with exact shadow scoring over the live ANN index.
+- **Vector-DB adapters** (opt-in): pgvector, Qdrant (server or embedded), Chroma, and
+  LanceDB, all validated by one shared behavioral contract, with exact shadow scoring
+  over the live index.
+- **Embedding providers**: local hash ($0, default), sentence-transformers ($0, real
+  semantics, no API key), OpenAI, Cohere, and Voyage; every provider-billed call is
+  cost-gated.
 - **Never-flaky CI gate**: per-snapshot noise calibration, near-tie exclusion, bootstrap CIs, McNemar's test, Benjamini-Hochberg FDR correction.
 - **Zero-re-embed replay & sweeps**: retune fusion weights or ablate factors without paying to re-embed.
 - **Cost-gated by design**: any provider-billed operation prints an estimate and requires `--yes` or `--max-cost`.
@@ -62,11 +67,23 @@ pip install recallops
 > Pin a version for reproducible installs, e.g. `pip install "recallops==0.1.0"`.
 
 The default stack (local hash embeddings + built-in exact-KNN adapter) runs fully
-**offline at $0**, no API keys, no server. For the pgvector adapter:
+**offline at $0**, no API keys, no server. Every other adapter and embedding
+provider ships as an opt-in extra:
 
 ```bash
 pip install 'recallops[pg]'      # adds the psycopg-based pgvector adapter
 ```
+
+```bash
+pip install 'recallops[qdrant]'     # Qdrant adapter (server or embedded local mode)
+pip install 'recallops[chroma]'     # Chroma adapter (embedded)
+pip install 'recallops[lancedb]'    # LanceDB adapter (embedded)
+pip install 'recallops[st]'         # sentence-transformers embeddings ($0, no API key)
+pip install 'recallops[all]'        # everything above
+```
+
+Cohere (`COHERE_API_KEY`) and Voyage (`VOYAGE_API_KEY`) embeddings need no extra:
+they use the same zero-dependency HTTP path as OpenAI.
 
 Develop against a checkout:
 
@@ -272,7 +289,7 @@ ingestion path. It complements the tools around it rather than replacing them:
 
 | Category | What those tools do | How RecallOps relates |
 |---|---|---|
-| **Vector databases** (pgvector, and similar) | Store and serve nearest-neighbor search at query time. | RecallOps is *not* one. It reads/writes through an adapter (built-in exact-KNN, or pgvector) and shadow-scores exactly to separate real regressions from ANN noise. |
+| **Vector databases** (pgvector, and similar) | Store and serve nearest-neighbor search at query time. | RecallOps is *not* one. It reads/writes through an adapter (built-in exact-KNN, pgvector, Qdrant, Chroma, LanceDB) and shadow-scores exactly to separate real regressions from ANN noise. |
 | **Observability / tracing** (LLM tracing, request logs) | Watch production traffic and latency at serving time. | RecallOps is *not* one. It works in the ingestion/CI path on golden sets, before a change ships, and can *prove* root cause; tracing observes, it does not run counterfactuals. |
 | **Eval-metrics libraries** (Ragas, DeepEval, and similar) | Score generation quality (faithfulness, answer relevance, …). | RecallOps *integrates* with them. It owns retrieval metrics and the CI gate; generation-quality metrics come from those libraries and are never part of the default gate. |
 
@@ -414,7 +431,7 @@ Apache-2.0. See [`LICENSE`](LICENSE).
 
 RecallOps builds on [NumPy](https://numpy.org/), [PyArrow](https://arrow.apache.org/),
 [Click](https://click.palletsprojects.com/), and [Rich](https://github.com/Textualize/rich),
-and integrates with [pgvector](https://github.com/pgvector/pgvector) for the opt-in
-adapter. The statistical gate draws on standard techniques: bootstrap confidence
-intervals, McNemar's exact test, and the Benjamini-Hochberg FDR correction. Generation-
-quality evaluation is delegated to projects such as Ragas and DeepEval.
+and integrates with [pgvector](https://github.com/pgvector/pgvector), one of several
+opt-in vector-DB adapters. The statistical gate draws on standard techniques: bootstrap
+confidence intervals, McNemar's exact test, and the Benjamini-Hochberg FDR correction.
+Generation-quality evaluation is delegated to projects such as Ragas and DeepEval.

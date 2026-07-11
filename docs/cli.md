@@ -27,11 +27,38 @@ collections stay per-project when several projects share one vector DB.
 
 | Flag | Default | Purpose |
 |---|---|---|
-| `--adapter [local\|pgvector]` | `local` | Vector adapter to configure. |
+| `--adapter [local\|pgvector\|qdrant\|chroma\|lancedb]` | `local` | Vector adapter to configure. |
 | `--source` | `docs` | Documents directory. |
 | `--name` | current dir name | Project name (namespaces serving collections). |
 | `--dsn` | none | pgvector DSN (pgvector adapter only). |
 | `--force` | off | Overwrite an existing `recall.yaml`. |
+
+`init` only wires up `local` and `pgvector` (via `--dsn`) from the command
+line; the `qdrant`, `chroma`, and `lancedb` adapters are selected with
+`--adapter` and then configured by editing the `adapter:` block in
+`recall.yaml`, or their environment variables. Each of these three defaults
+its embedded storage path to `.recall/index/<type>` when neither `path` nor
+(for qdrant) `url` is set:
+
+```yaml
+adapter:
+  type: qdrant
+  url: http://localhost:6333      # or omit url and set path: for embedded local mode
+  # api_key: ...                  # or RECALL_QDRANT_URL / RECALL_QDRANT_API_KEY
+
+adapter:
+  type: chroma                    # embedded; path defaults to .recall/index/chroma
+
+adapter:
+  type: lancedb                   # embedded; path defaults to .recall/index/lancedb
+```
+
+Embedding providers are configured under `pipeline.embedding` in `recall.yaml`
+(or overridden per-ingest with `--embedding provider:model:dims`). Providers
+for `embedding.provider`: `local` (hash, $0), `st` (sentence-transformers,
+$0, real semantics; params: `device`, `revision`), `openai`, `cohere`,
+`voyage` (API key via `OPENAI_API_KEY` / `COHERE_API_KEY` /
+`VOYAGE_API_KEY`; all cost-gated).
 
 ### `recall ingest [PATH]`
 
