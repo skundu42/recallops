@@ -11,6 +11,9 @@ Two conventions apply throughout:
 - **Cost gating** (Principle 5): the default local provider is $0 and
   auto-approves. Any provider-billed operation prints a cost estimate and
   requires `--yes` or a `--max-cost N` budget before it will spend.
+- **HTTP timeouts**: every provider HTTP call (embedding requests, `--llm`
+  dataset generation) is bounded by `RECALL_HTTP_TIMEOUT` (seconds, default
+  `60`), so a stalled provider API can no longer hang a command indefinitely.
 
 Global: `recall --version` prints the installed `recallops` version; every
 command takes `--help`.
@@ -53,6 +56,9 @@ adapter:
   type: lancedb                   # embedded; path defaults to .recall/index/lancedb
 ```
 
+When both are set, a `url` in `recall.yaml` takes precedence over
+`RECALL_QDRANT_URL` (same for `api_key` over `RECALL_QDRANT_API_KEY`).
+
 Embedding providers are configured under `pipeline.embedding` in `recall.yaml`
 (or overridden per-ingest with `--embedding provider:model:dims`). Providers
 for `embedding.provider`: `local` (hash, $0), `st` (sentence-transformers,
@@ -79,19 +85,29 @@ stages for one run without editing `recall.yaml`, handy for A/B ingests.
 
 ### `recall snapshot`
 
-Inspects committed snapshots.
+Inspects committed snapshots and manages pins.
 
-- **`recall snapshot list`**: a table of snapshots (id, parent, doc/chunk counts).
+- **`recall snapshot list`**: a table of snapshots (id, parent, doc/chunk counts,
+  and a `Pinned` column marking pinned snapshots with `*`).
 - **`recall snapshot show <snap>`**: the resolved snapshot's full manifest as JSON.
+- **`recall snapshot pin <snap>`**: pin a snapshot so `recall gc` never removes it.
+- **`recall snapshot unpin <snap>`**: remove a pin (the snapshot becomes eligible
+  for `gc` again).
 
 ### `recall dataset`
 
 Creates and manages golden datasets (the query set evals run against).
 
-- **`recall dataset generate`**: bootstrap a dataset offline from a snapshot's
-  chunks (no LLM/network) and print a stratification report.
+- **`recall dataset generate`**: bootstrap a dataset from a snapshot's chunks
+  and print a stratification report. Default is an offline heuristic ($0, no
+  LLM/network). `--llm openai[:model]` (e.g. `openai:gpt-4o-mini`, the
+  default model) generates the questions with an LLM instead, using
+  `OPENAI_API_KEY`; it is cost-gated like any other provider-billed
+  operation and the questions themselves are not deterministic, though
+  `--seed` still controls chunk sampling either way.
   Flags: `--n` (100), `--seed` (0), `--name` (`golden`), `--snapshot` (`latest`),
-  `--yes` (approve LLM cost; unused offline).
+  `--llm` (none: offline heuristic), `--yes` / `--max-cost` (approve/budget the
+  LLM generation cost; unused offline).
 - **`recall dataset import <file>`**: import a JSON/JSONL golden file.
   Flag: `--name` (`imported`).
 - **`recall dataset mine --from <traces.jsonl>`**: mine cases from a production
@@ -100,7 +116,10 @@ Creates and manages golden datasets (the query set evals run against).
 - **`recall dataset show <dataset_id>`**: a table of cases (id, question,
   expected sources, tags).
 - **`recall dataset curate <dataset_id>`**: accept/reject cases into a curated
-  copy. Flags: `--accept`, `--reject` (comma-separated case ids).
+  copy, or edit case fields in bulk. Flags: `--accept`, `--reject`
+  (comma-separated case ids); `--edit-file` (a JSONL file, one
+  `{"id": ..., "question"?, "expected_sources"?, "tags"?}` object per line;
+  identity/provenance fields are not editable).
 
 ---
 
@@ -114,7 +133,8 @@ stored embeddings; live mode serves through the configured adapter. Optionally
 enforces a gate: `--fail-if` is a raw threshold (exits 1 when met), while
 `--gate statistical` runs the never-flaky gate against the snapshot's parent and
 requires a prior `recall calibrate`. If no `DATASET_ID` is given, the most recent
-dataset is used.
+dataset is used. `--live` warns if the snapshot's serving collection is empty
+(0 vectors) instead of silently scoring all-zero dense metrics.
 
 | Flag | Default | Purpose |
 |---|---|---|
@@ -132,6 +152,8 @@ gating. Re-runs an identical snapshot `--runs` times (rebuilding the index
 between runs where the adapter supports it), derives the near-tie threshold
 `epsilon` and per-metric std, and stores a `CalibrationRecord` for that snapshot.
 On the built-in exact adapter every run is identical and `epsilon` collapses to 0.
+Always serves live, so it warns if the serving collection is empty (0 vectors)
+before running.
 
 | Flag | Default | Purpose |
 |---|---|---|
@@ -273,8 +295,9 @@ for a ready-to-adapt two-phase workflow.
 ### `recall gc`
 
 Garbage-collects the artifacts (chunk sets and embedding files) of old snapshots,
-keeping the most recent `--keep` snapshots (plus any pinned ones). This is the
-main lever for bounding store size: see [`sizing.md`](sizing.md).
+keeping the most recent `--keep` snapshots plus any snapshots pinned with
+`recall snapshot pin`. This is the main lever for bounding store size: see
+[`sizing.md`](sizing.md).
 
 | Flag | Default | Purpose |
 |---|---|---|
