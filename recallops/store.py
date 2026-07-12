@@ -550,7 +550,7 @@ class ProjectStore:
 
         # Index rows go first, in one transaction: interrupted mid-gc, the
         # worst case is an orphan artifact file. The reverse order leaves rows
-        # for deleted files — a snapshot listed without its artifacts, or an
+        # for deleted files - a snapshot listed without its artifacts, or an
         # embeddings row whose missing parquet makes later ingests skip
         # re-embedding and commit vector-less snapshots.
         with self._conn:
