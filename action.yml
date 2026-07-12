@@ -102,10 +102,12 @@ runs:
         DIFF_ID="$(grep -oE 'diff_[0-9a-f]+' recall-ci.log | head -1)"
         echo "$DIFF_ID" > recall-diff-id.txt
         echo "diff_id=$DIFF_ID" >> "$GITHUB_OUTPUT"
-        if [ "$code" = "0" ]; then
-          echo "gate=pass" >> "$GITHUB_OUTPUT"
-        else
+        if [ "$code" != "0" ]; then
           echo "gate=fail" >> "$GITHUB_OUTPUT"
+        elif [ -z "$DIFF_ID" ]; then
+          echo "gate=none" >> "$GITHUB_OUTPUT"
+        else
+          echo "gate=pass" >> "$GITHUB_OUTPUT"
         fi
 
     - if: ${{ inputs.comment == 'true' && github.event_name == 'pull_request' }}
@@ -118,7 +120,8 @@ runs:
             --repo "${{ github.repository }}" \
             --pr "${{ github.event.pull_request.number }}" \
             --body-file recall-report.md \
-            --slug report
+            --slug report \
+            || echo "::warning::RecallOps could not post/update the PR comment (see step log); the gate verdict is unaffected."
         else
           echo "No recall-report.md produced; nothing to comment."
         fi

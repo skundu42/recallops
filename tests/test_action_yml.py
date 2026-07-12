@@ -35,6 +35,7 @@ def test_every_run_step_declares_bash_and_comment_uses_pr_comment_module():
     assert "python -m recallops.pr_comment" in joined
     assert "recall ci" in joined
     assert "recall attribute" in joined
+    assert "::warning::" in joined
 
 
 def test_example_workflow_uses_the_action():
