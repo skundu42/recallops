@@ -36,6 +36,11 @@ def test_every_run_step_declares_bash_and_comment_uses_pr_comment_module():
     assert "recall ci" in joined
     assert "recall attribute" in joined
     assert "::warning::" in joined
+    # Finding #2: a crash before gating (missing recall.yaml, bad DSN) must not
+    # be reported as a statistical regression -- `recall ci` prints the diff id
+    # BEFORE the gate check, so nonzero exit with an empty DIFF_ID is always a
+    # crash, never a regression.
+    assert "gate=error" in joined
 
 
 def test_example_workflow_uses_the_action():

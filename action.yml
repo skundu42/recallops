@@ -55,7 +55,7 @@ outputs:
     description: "The diff id produced by phase 1 (empty on first ingest)."
     value: ${{ steps.run.outputs.diff_id }}
   gate:
-    description: "'pass', 'fail', or 'none' (attribute phase / first ingest)."
+    description: "'pass', 'fail', 'error' (crash before gating), or 'none' (attribute phase / first ingest)."
     value: ${{ steps.run.outputs.gate }}
 
 runs:
@@ -102,7 +102,13 @@ runs:
         DIFF_ID="$(grep -oE 'diff_[0-9a-f]+' recall-ci.log | head -1)"
         echo "$DIFF_ID" > recall-diff-id.txt
         echo "diff_id=$DIFF_ID" >> "$GITHUB_OUTPUT"
-        if [ "$code" != "0" ]; then
+        # `recall ci` prints the diff id BEFORE the gate check, so a nonzero
+        # exit with an empty DIFF_ID deterministically means it crashed before
+        # gating (missing recall.yaml, bad DSN, etc.) -- not a retrieval
+        # regression. Only a nonzero exit WITH a diff id is a real gate fail.
+        if [ "$code" != "0" ] && [ -z "$DIFF_ID" ]; then
+          echo "gate=error" >> "$GITHUB_OUTPUT"
+        elif [ "$code" != "0" ]; then
           echo "gate=fail" >> "$GITHUB_OUTPUT"
         elif [ -z "$DIFF_ID" ]; then
           echo "gate=none" >> "$GITHUB_OUTPUT"
@@ -136,4 +142,10 @@ runs:
       shell: bash
       run: |
         echo "::error::RecallOps gate failed: statistically significant retrieval regression."
+        exit 1
+
+    - if: ${{ steps.run.outputs.gate == 'error' }}
+      shell: bash
+      run: |
+        echo "::error::recall ci failed before gating (configuration or environment error, not a retrieval regression); see the step log."
         exit 1
