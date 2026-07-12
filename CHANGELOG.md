@@ -9,6 +9,12 @@ changes; these will always be called out under **Changed** or **Removed**.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-12
+
+Reach + reliability + CI activation: three new vector-DB adapters and three new
+embedding providers, hardened HTTP and caching paths, and a composite GitHub
+Action that makes the two-phase CI gate a two-line workflow.
+
 ### Added
 - Qdrant adapter (`recallops[qdrant]`): server or embedded local mode.
 - Chroma adapter (`recallops[chroma]`): embedded.
@@ -131,5 +137,6 @@ Pre-release hardening from an adversarial review of the engine:
 - Retrieval replays Recorder-logged candidates for a bespoke rerank stage instead
   of crashing every eval; managed-mode unknown reranker tools get a clear error.
 
-[Unreleased]: https://github.com/skundu42/recallops/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/skundu42/recallops/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/skundu42/recallops/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/skundu42/recallops/releases/tag/v0.1.0
