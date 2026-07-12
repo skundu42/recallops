@@ -7,6 +7,7 @@ every push. The comment is re-found via an invisible HTML marker, so the
 operation is idempotent across re-runs.
 
 Stdlib only (urllib); authenticates with a token from ``GITHUB_TOKEN``.
+GitHub API and network failures exit 1 with a one-line error on stderr.
 
 Usage: python -m recallops.pr_comment --repo OWNER/NAME --pr N \
            --body-file recall-report.md [--slug report]
@@ -17,6 +18,7 @@ import argparse
 import json
 import os
 import sys
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -100,8 +102,16 @@ def main(argv: list[str] | None = None) -> int:
         print("error: GITHUB_TOKEN is not set", file=sys.stderr)
         return 2
     body = Path(args.body_file).read_text(encoding="utf-8")
-    result = upsert_comment(args.repo, args.pr, body, args.slug, token,
-                            api_url=args.api_url)
+    try:
+        result = upsert_comment(args.repo, args.pr, body, args.slug, token,
+                                api_url=args.api_url)
+    except urllib.error.HTTPError as exc:
+        print(f"error: GitHub API returned {exc.code} for {args.repo}#{args.pr}: "
+              f"{exc.reason}", file=sys.stderr)
+        return 1
+    except urllib.error.URLError as exc:
+        print(f"error: cannot reach the GitHub API: {exc.reason}", file=sys.stderr)
+        return 1
     print(f"{result['action']} comment {result['id']} on {args.repo}#{args.pr}")
     return 0
 

@@ -84,3 +84,20 @@ def test_main_happy_path(monkeypatch, tmp_path, capsys):
     assert rc == 0
     assert calls == [("o/r", 5, "## Report", "report")]
     assert "created" in capsys.readouterr().out
+
+
+def test_main_reports_api_errors_cleanly(monkeypatch, tmp_path, capsys):
+    import urllib.error
+
+    monkeypatch.setenv("GITHUB_TOKEN", "t")
+
+    def boom(repo, pr, body, slug, token, api_url=pc.DEFAULT_API_URL):
+        raise urllib.error.HTTPError("u", 401, "Unauthorized", None, None)
+
+    monkeypatch.setattr(pc, "upsert_comment", boom)
+    f = tmp_path / "r.md"
+    f.write_text("hi", encoding="utf-8")
+    rc = pc.main(["--repo", "o/r", "--pr", "5", "--body-file", str(f)])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "401" in err and "o/r#5" in err
