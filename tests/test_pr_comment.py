@@ -101,3 +101,39 @@ def test_main_reports_api_errors_cleanly(monkeypatch, tmp_path, capsys):
     assert rc == 1
     err = capsys.readouterr().err
     assert "401" in err and "o/r#5" in err
+
+
+def test_main_missing_body_file_is_a_clean_usage_error(monkeypatch, tmp_path, capsys):
+    # Finding #3: a nonexistent --body-file must not raise a raw
+    # FileNotFoundError traceback; it is a usage error (rc 2), like the
+    # missing-GITHUB_TOKEN case above.
+    monkeypatch.setenv("GITHUB_TOKEN", "t")
+    missing = tmp_path / "does-not-exist.md"
+    rc = pc.main(["--repo", "o/r", "--pr", "5", "--body-file", str(missing)])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert str(missing) in err
+
+
+def test_main_reports_api_errors_include_json_detail(monkeypatch, tmp_path, capsys):
+    # Finding #4: GitHub's JSON error body carries the actionable string (e.g.
+    # "Resource not accessible by integration"); the handler must surface it.
+    import io
+    import urllib.error
+
+    monkeypatch.setenv("GITHUB_TOKEN", "t")
+
+    def boom(repo, pr, body, slug, token, api_url=pc.DEFAULT_API_URL):
+        raise urllib.error.HTTPError(
+            "u", 403, "Forbidden", None,
+            io.BytesIO(b'{"message": "Resource not accessible by integration"}'),
+        )
+
+    monkeypatch.setattr(pc, "upsert_comment", boom)
+    f = tmp_path / "r.md"
+    f.write_text("hi", encoding="utf-8")
+    rc = pc.main(["--repo", "o/r", "--pr", "5", "--body-file", str(f)])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "403" in err and "o/r#5" in err
+    assert "Resource not accessible by integration" in err

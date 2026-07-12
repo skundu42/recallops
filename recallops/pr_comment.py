@@ -101,13 +101,25 @@ def main(argv: list[str] | None = None) -> int:
     if not token:
         print("error: GITHUB_TOKEN is not set", file=sys.stderr)
         return 2
-    body = Path(args.body_file).read_text(encoding="utf-8")
+    try:
+        body = Path(args.body_file).read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"error: cannot read body file {args.body_file}: {exc}", file=sys.stderr)
+        return 2
     try:
         result = upsert_comment(args.repo, args.pr, body, args.slug, token,
                                 api_url=args.api_url)
     except urllib.error.HTTPError as exc:
-        print(f"error: GitHub API returned {exc.code} for {args.repo}#{args.pr}: "
-              f"{exc.reason}", file=sys.stderr)
+        detail = ""
+        try:
+            detail = json.loads(exc.read().decode("utf-8")).get("message", "")
+        except Exception:
+            pass
+        msg = (f"error: GitHub API returned {exc.code} for {args.repo}#{args.pr}: "
+               f"{exc.reason}")
+        if detail:
+            msg += f": {detail}"
+        print(msg, file=sys.stderr)
         return 1
     except urllib.error.URLError as exc:
         print(f"error: cannot reach the GitHub API: {exc.reason}", file=sys.stderr)
