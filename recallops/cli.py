@@ -58,6 +58,7 @@ from .ingest import ingest as run_ingest
 from .models import (
     CalibrationRecord,
     DiffResult,
+    GateResult,
     GoldenDataset,
     SnapshotManifest,
     StageSpec,
@@ -924,6 +925,9 @@ def ci(config_path: str, base: str | None, dataset_id: str | None, out: str) -> 
         except GateNotCalibrated:
             gate = None
 
+    if gate is not None:
+        store.save_json("gate", dr.diff_id, gate.to_dict())
+
     markdown = diff_summary_markdown(dr, None, gate, calibration_ok=calib_raw is not None)
     Path(out).write_text(markdown, encoding="utf-8")
     console.print(f"Wrote {out}.")
@@ -952,12 +956,17 @@ def report(diff_id: str, fmt: str, out: str | None) -> None:
 
     attributions = {qid: AttributionReport.from_dict(a) for qid, a in attr_raw.items()}
 
+    gate_raw = store.get_json("gate", diff_id)
+    gate = GateResult.from_dict(gate_raw) if gate_raw else None
+    calibration_ok = store.get_json("calibration", dr.snapshot_a) is not None
+
     if fmt == "json":
         rendered = json.dumps(render_diff_json(dr, attributions or None), indent=2)
     elif fmt == "html":
-        rendered = diff_report_html(dr, attributions or None, gate=None)
+        rendered = diff_report_html(dr, attributions or None, gate=gate)
     else:
-        rendered = diff_summary_markdown(dr, attributions or None, gate=None, calibration_ok=False)
+        rendered = diff_summary_markdown(dr, attributions or None, gate=gate,
+                                         calibration_ok=calibration_ok)
 
     if out:
         Path(out).write_text(rendered, encoding="utf-8")

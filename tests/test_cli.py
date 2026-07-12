@@ -308,6 +308,29 @@ def test_ci_uses_baseline_calibration_not_fresh_snapshot(corpus_dir):
         assert "Calibration: not present" not in report
 
 
+def test_ci_persists_gate_and_report_rerenders_it(corpus_dir):
+    # Finding #1: `ci` computes a GateResult but never persisted it, so `recall
+    # report --diff <id>` (used by phase-2 re-render in the Action) re-rendered
+    # with gate=None, calibration_ok=False -- erasing the Gate block and
+    # claiming "Calibration: not present." even on a calibrated project.
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        ds_id = _bootstrap(runner, str(corpus_dir))
+        _run(runner, ["calibrate", "--dataset", ds_id, "--runs", "2"])
+        _run(runner, ["ingest", "--chunker", FIXED_TOKEN, "--chunk-params", FT_PARAMS])
+        cfg = ProjectConfig.load("recall.yaml")
+        cfg.pipeline["chunker"] = {"tool": FIXED_TOKEN, "params": {"max_tokens": 30, "overlap": 0}}
+        cfg.save("recall.yaml")
+        _run(runner, ["ci", "--dataset", ds_id])
+        diff_id = ProjectStore(".").list_json("diff")[0]
+        assert ProjectStore(".").get_json("gate", diff_id) is not None
+
+        result = _run(runner, ["report", "--diff", diff_id, "--format", "md"])
+        assert "**Gate:" in result.output
+        assert "Calibration: not present." not in result.output
+        assert "Calibration: present" in result.output
+
+
 def test_gate_works_for_non_default_primary_metric(corpus_dir):
     # Round-3 finding: threading primary_metric into diff() made classify_query
     # read metrics[primary_metric] unconditionally; the eval must compute that k
