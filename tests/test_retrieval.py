@@ -131,6 +131,33 @@ def test_query_vector_is_cached_across_engines(tmp_project: Path, small_corpus: 
     assert calls["n"] == 1
 
 
+def test_query_vector_cache_persists_across_processes(tmp_project: Path, small_corpus: Path) -> None:
+    # FR-1.5 for queries: a NEW ProjectStore on the same root (a fresh CI
+    # process) must serve query vectors from the persistent cache, zero
+    # provider calls.
+    root = tmp_project / "proj"
+    store, manifest = build_snapshot(root, small_corpus)
+    engine = RetrievalEngine(store, manifest)
+    provider = engine.provider
+    calls = {"n": 0}
+    real_embed_queries = provider.embed_queries
+
+    def counting_embed_queries(texts):
+        calls["n"] += 1
+        return real_embed_queries(texts)
+
+    provider.embed_queries = counting_embed_queries
+    v1 = engine.query_vector("how does the bootstrap command validate the manifest?")
+    assert calls["n"] == 1
+
+    store2 = ProjectStore(root)
+    engine2 = RetrievalEngine(store2, store2.get_snapshot(manifest.snapshot_id))
+    engine2._provider = provider  # same counting provider
+    v2 = engine2.query_vector("how does the bootstrap command validate the manifest?")
+    assert calls["n"] == 1  # served from the persistent cache
+    np.testing.assert_array_equal(v1, v2)
+
+
 def test_replay_matches_live_exact_adapter(tmp_project: Path, small_corpus: Path) -> None:
     adapter = LocalIndexAdapter(tmp_project / "index")
     store, manifest = build_snapshot(tmp_project / "proj", small_corpus, adapter=adapter)

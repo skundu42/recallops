@@ -258,7 +258,7 @@ options):
 |---|---|
 | `init` | Write `recall.yaml` and create the `.recall` provenance store. |
 | `ingest` | Ingest a corpus into a new immutable, content-addressed snapshot. |
-| `snapshot` | Inspect snapshots (`list`, `show`). |
+| `snapshot` | Inspect snapshots and manage pins (`list`, `show`, `pin`, `unpin`). |
 | `dataset` | Create and manage golden datasets (`generate`, `curate`, `import`, `mine`, `list`, `show`). |
 | `eval` | Evaluate a snapshot against a golden dataset (raw threshold or statistical gate). |
 | `calibrate` | Calibrate a snapshot's noise floor, required before statistical gating. |
@@ -285,7 +285,7 @@ ingestion path. It complements the tools around it rather than replacing them:
 |---|---|---|
 | **Vector databases** (pgvector, and similar) | Store and serve nearest-neighbor search at query time. | RecallOps is *not* one. It reads/writes through an adapter (built-in exact-KNN, pgvector, Qdrant, Chroma, LanceDB) and shadow-scores exactly to separate real regressions from ANN noise. |
 | **Observability / tracing** (LLM tracing, request logs) | Watch production traffic and latency at serving time. | RecallOps is *not* one. It works in the ingestion/CI path on golden sets, before a change ships, and can *prove* root cause; tracing observes, it does not run counterfactuals. |
-| **Eval-metrics libraries** (Ragas, DeepEval, and similar) | Score generation quality (faithfulness, answer relevance, …). | RecallOps *integrates* with them. It owns retrieval metrics and the CI gate; generation-quality metrics come from those libraries and are never part of the default gate. |
+| **Eval-metrics libraries** (Ragas, DeepEval, and similar) | Score generation quality (faithfulness, answer relevance, …). | RecallOps *imports their dataset formats* (golden cases) and stays out of their lane: it owns retrieval metrics and the CI gate; generation-quality scoring stays in those libraries, run side by side, and is never part of the default gate. |
 
 The distinctive job, **verified counterfactual root-cause attribution**, requires
 owning the versioned ingestion pipeline, which none of the above do.
@@ -321,10 +321,18 @@ snapshot_id = rec.commit()
 
 ## CI setup: the two-phase gate
 
-Copy [`examples/github-action/recall-ci.yml`](examples/github-action/recall-ci.yml)
-into your repo's `.github/workflows/` and fill in the clearly-marked `TODO(you)`
-placeholders (baseline store, docs path, optional provider secret). It implements a
-two-phase gate:
+Add the composite [GitHub Action](action.yml) to a workflow:
+
+```yaml
+- uses: actions/checkout@v4
+- uses: skundu42/recallops@main   # pin a release tag in real projects
+```
+
+The action installs RecallOps, restores the baseline `.recall` store from the
+actions cache, runs the two-phase gate, and posts a single self-updating PR
+comment. Copy [`examples/github-action/recall-ci.yml`](examples/github-action/recall-ci.yml)
+into your repo's `.github/workflows/` for the full two-phase workflow, including
+baseline-store handling across the gate and attribute jobs. It implements:
 
 - **Phase 1, blocking (< 5 min):** `recall ci` runs eval + diff + funnel attribution,
   posts `recall-report.md` as a PR comment, and fails the check on a statistically
@@ -361,8 +369,9 @@ see [`docs/sizing.md`](docs/sizing.md) for the full table (10k → 10M chunks) a
 ## Metrics & determinism
 
 Native retrieval metrics only (deterministic given rankings): `recall@k`, `MRR`,
-`nDCG@k`, `hit_rate@k`, per-query and aggregate. Generation-quality metrics come from
-Ragas/DeepEval integrations and are never part of the default CI gate. Identical inputs
+`nDCG@k`, `hit_rate@k`, per-query and aggregate. Generation-quality metrics are out
+of scope by design (run Ragas/DeepEval alongside; RecallOps imports their dataset
+formats) and are never part of the default CI gate. Identical inputs
 produce byte-identical manifests; every stochastic step takes an explicit seed. In
 local mode, customer data (documents, chunks, embeddings) never leaves
 customer-controlled storage.

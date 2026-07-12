@@ -308,6 +308,29 @@ def test_ci_uses_baseline_calibration_not_fresh_snapshot(corpus_dir):
         assert "Calibration: not present" not in report
 
 
+def test_ci_persists_gate_and_report_rerenders_it(corpus_dir):
+    # Finding #1: `ci` computes a GateResult but never persisted it, so `recall
+    # report --diff <id>` (used by phase-2 re-render in the Action) re-rendered
+    # with gate=None, calibration_ok=False -- erasing the Gate block and
+    # claiming "Calibration: not present." even on a calibrated project.
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        ds_id = _bootstrap(runner, str(corpus_dir))
+        _run(runner, ["calibrate", "--dataset", ds_id, "--runs", "2"])
+        _run(runner, ["ingest", "--chunker", FIXED_TOKEN, "--chunk-params", FT_PARAMS])
+        cfg = ProjectConfig.load("recall.yaml")
+        cfg.pipeline["chunker"] = {"tool": FIXED_TOKEN, "params": {"max_tokens": 30, "overlap": 0}}
+        cfg.save("recall.yaml")
+        _run(runner, ["ci", "--dataset", ds_id])
+        diff_id = ProjectStore(".").list_json("diff")[0]
+        assert ProjectStore(".").get_json("gate", diff_id) is not None
+
+        result = _run(runner, ["report", "--diff", diff_id, "--format", "md"])
+        assert "**Gate:" in result.output
+        assert "Calibration: not present." not in result.output
+        assert "Calibration: present" in result.output
+
+
 def test_gate_works_for_non_default_primary_metric(corpus_dir):
     # Round-3 finding: threading primary_metric into diff() made classify_query
     # read metrics[primary_metric] unconditionally; the eval must compute that k
@@ -370,6 +393,19 @@ def test_dataset_list_show_curate(corpus_dir):
         assert ProjectStore(".").get_dataset(ds_id).case("q_000") is None
 
 
+def test_dataset_curate_edit_file(corpus_dir):
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        ds = _bootstrap(runner, str(corpus_dir), n=5)
+        case_id = ProjectStore(".").get_dataset(ds).cases[0].id
+        Path("edits.jsonl").write_text(
+            json.dumps({"id": case_id, "question": "An edited question?"}) + "\n",
+            encoding="utf-8",
+        )
+        _run(runner, ["dataset", "curate", ds, "--edit-file", "edits.jsonl"])
+        assert ProjectStore(".").get_dataset(ds).case(case_id).question == "An edited question?"
+
+
 def test_dataset_import_and_mine(corpus_dir):
     runner = CliRunner()
     with runner.isolated_filesystem():
@@ -394,6 +430,26 @@ def test_gc_runs(corpus_dir):
         _bootstrap(runner, str(corpus_dir), n=6)
         result = _run(runner, ["gc", "--keep", "5"])
         assert "Removed" in result.output
+
+
+def test_snapshot_pin_survives_gc(corpus_dir):
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        _bootstrap(runner, str(corpus_dir))
+        first = _latest_snapshot()
+        # two more snapshots so keep-last-1 would evict `first` without a pin
+        for params in ('{"max_tokens": 40, "overlap": 0}', '{"max_tokens": 50, "overlap": 0}'):
+            _run(runner, ["ingest", "--chunker", FIXED_TOKEN, "--chunk-params", params])
+        _run(runner, ["snapshot", "pin", first])
+        _run(runner, ["gc", "--keep", "1"])
+        remaining = {m.snapshot_id for m in ProjectStore(".").list_snapshots()}
+        assert first in remaining
+        assert len(remaining) == 2  # pinned + latest
+
+        _run(runner, ["snapshot", "unpin", first])
+        _run(runner, ["gc", "--keep", "1"])
+        remaining = {m.snapshot_id for m in ProjectStore(".").list_snapshots()}
+        assert first not in remaining
 
 
 # -- sweeps / migration / drift ----------------------------------------------
@@ -493,3 +549,68 @@ def test_scorecard_missing_module_is_graceful():
     with runner.isolated_filesystem():
         result = _run(runner, ["scorecard"], code=1)
         assert "not available" in result.output
+
+
+# -- empty-collection warning on live eval -----------------------------------
+
+
+def test_live_eval_warns_on_empty_collection(corpus_dir):
+    from recallops.config import ProjectConfig, build_adapter
+    from recallops.ingest import collection_name
+
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        ds = _bootstrap(runner, str(corpus_dir))
+        store = ProjectStore(".")
+        m = store.resolve_snapshot("latest")
+        adapter = build_adapter(ProjectConfig.load("recall.yaml"), store)
+        name = collection_name(m, store.project)
+        dims = int(m.pipeline.stage("embed").params["dims"])
+        adapter.drop(name)
+        adapter.ensure_collection(name, dims)  # exists but 0 vectors
+        adapter.close()
+
+        result = _run(runner, ["eval", ds, "--live"])
+        assert "0 vectors" in result.output
+        assert "warning" in result.output.lower()
+
+
+def test_live_eval_no_warning_when_collection_populated(corpus_dir):
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        ds = _bootstrap(runner, str(corpus_dir))
+        result = _run(runner, ["eval", ds, "--live"])
+        assert "0 vectors" not in result.output
+
+
+# -- LLM-backed dataset generation ---------------------------------------------
+
+
+def test_dataset_generate_llm_path(corpus_dir, monkeypatch):
+    from recallops import llm as llm_module
+
+    def fake_post(url, body, headers, timeout=None):
+        prompt = body["messages"][0]["content"]
+        # unique per prompt so the generator's dedup keeps them all
+        return {"choices": [{"message": {"content": f"What is covered by: {prompt[-48:]}?"}}]}
+
+    monkeypatch.setattr(llm_module, "_post_json", fake_post)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        _bootstrap(runner, str(corpus_dir), n=5)
+
+        # billed operation without approval: the cost gate must block
+        result = runner.invoke(main, ["dataset", "generate", "--n", "3",
+                                      "--llm", "openai", "--name", "lgold"])
+        assert result.exit_code != 0
+        assert "requires approval" in result.output
+
+        result = _run(runner, ["dataset", "generate", "--n", "3", "--llm", "openai",
+                               "--name", "lgold", "--yes"])
+        assert "lgold-v1" in result.output
+        ds = ProjectStore(".").get_dataset("lgold-v1")
+        assert len(ds.cases) == 3
+        assert all(c.question.startswith("What is covered by:") for c in ds.cases)
+        assert all(c.origin == "synthetic" for c in ds.cases)

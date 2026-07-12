@@ -221,11 +221,46 @@ def mine_jsonl(path: Path, dataset_id: str) -> GoldenDataset:
     return GoldenDataset(dataset_id, cases)
 
 
-def curate(ds: GoldenDataset, decisions: dict[str, str]) -> GoldenDataset:
+_EDITABLE_FIELDS = ("question", "expected_sources", "tags")
+
+
+def curate(ds: GoldenDataset, decisions: dict[str, str],
+           edits: dict[str, dict] | None = None) -> GoldenDataset:
+    """Apply accept/reject decisions and optional per-case field edits
+    (FR-3.2). Edits may change ``question``, ``expected_sources`` and
+    ``tags`` only; identity and provenance (``id``, ``origin``,
+    ``source_trace``) are never editable."""
+    edits = edits or {}
     for case_id, decision in decisions.items():
         if decision not in ("accept", "reject"):
             raise ValueError(f"invalid decision {decision!r} for case {case_id!r}")
-    kept = [c for c in ds.cases if decisions.get(c.id) != "reject"]
+    known = {c.id for c in ds.cases}
+    for case_id, fields in edits.items():
+        if case_id not in known:
+            raise ValueError(f"edit for unknown case {case_id!r}")
+        if decisions.get(case_id) == "reject":
+            raise ValueError(f"case {case_id!r} is both edited and rejected")
+        bad = sorted(set(fields) - set(_EDITABLE_FIELDS))
+        if bad:
+            raise ValueError(
+                f"cannot edit field(s) {bad} of case {case_id!r}; "
+                f"editable: {list(_EDITABLE_FIELDS)}"
+            )
+    kept: list[GoldenCase] = []
+    for c in ds.cases:
+        if decisions.get(c.id) == "reject":
+            continue
+        fields = edits.get(c.id)
+        if fields:
+            c = GoldenCase(
+                id=c.id,
+                question=fields.get("question", c.question),
+                expected_sources=list(fields.get("expected_sources", c.expected_sources)),
+                tags=list(fields.get("tags", c.tags)),
+                origin=c.origin,
+                source_trace=c.source_trace,
+            )
+        kept.append(c)
     return GoldenDataset(ds.dataset_id, kept)
 
 

@@ -253,3 +253,31 @@ def test_stratification_report_on_generated(project):
     assert sum(v for k, v in report.items() if k in ("exact-term", "paraphrase")) == 12
     assert report["exact-term"] == 6
     assert report["paraphrase"] == 6
+
+
+def _two_case_ds():
+    return GoldenDataset("g-v1", [
+        GoldenCase(id="q_000", question="old?", expected_sources=["a.md"],
+                   tags=["t"], origin="synthetic"),
+        GoldenCase(id="q_001", question="keep?", expected_sources=["b.md"]),
+    ])
+
+
+def test_curate_applies_edits():
+    out = dataset.curate(_two_case_ds(), {}, edits={"q_000": {"question": "new?",
+                                                      "expected_sources": ["a.md", "c.md"]}})
+    edited = out.case("q_000")
+    assert edited.question == "new?"
+    assert edited.expected_sources == ["a.md", "c.md"]
+    assert edited.tags == ["t"]           # untouched field preserved
+    assert edited.origin == "synthetic"   # provenance preserved
+    assert out.case("q_001").question == "keep?"
+
+
+def test_curate_edit_validations():
+    with pytest.raises(ValueError):
+        dataset.curate(_two_case_ds(), {}, edits={"q_999": {"question": "x?"}})
+    with pytest.raises(ValueError):
+        dataset.curate(_two_case_ds(), {}, edits={"q_000": {"origin": "manual"}})
+    with pytest.raises(ValueError):
+        dataset.curate(_two_case_ds(), {"q_000": "reject"}, edits={"q_000": {"question": "x?"}})

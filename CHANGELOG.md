@@ -22,6 +22,23 @@ changes; these will always be called out under **Changed** or **Removed**.
 - `EmbeddingProvider.embed_queries` hook (backward compatible: defaults to
   `embed`).
 - `recallops[all]` convenience extra.
+- Composite GitHub Action (`uses: skundu42/recallops@<ref>`): two-phase gate
+  with a single self-updating PR comment (`recallops.pr_comment`); the example
+  workflow now consumes the action.
+- LLM-backed golden-dataset generation: `recall dataset generate --llm
+  openai[:model]`, cost-gated, using the caller's `OPENAI_API_KEY`.
+- Dataset curation edits: `recall dataset curate --edit-file edits.jsonl`.
+- `recall snapshot pin`/`unpin`: persistent pins that `recall gc` honors.
+- Live eval and calibrate warn when the serving collection is empty instead
+  of silently scoring zeros.
+
+### Fixed
+
+- Every provider HTTP call now has a timeout (`RECALL_HTTP_TIMEOUT`, default
+  60 s); a stalled embedding API can no longer hang ingest or CI forever.
+  OpenAI now shares the same HTTP path as Cohere/Voyage.
+- Query embeddings are persisted in the store (fp32), so a new process (every
+  CI run) no longer re-embeds and re-bills the whole query set.
 
 ### Unchanged
 - Snapshot ids are byte-identical to 0.1.0 (pinned by test).

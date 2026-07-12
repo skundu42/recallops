@@ -1,0 +1,151 @@
+# RecallOps composite GitHub Action (PRD FR-9.1).
+#
+# One action, two phases, one PR comment that updates in place:
+#   phase: gate       blocking phase 1 (ingest + eval + diff + funnel, <5 min,
+#                     no re-embedding); fails the check on a gated regression.
+#   phase: attribute  async phase 2 (counterfactual verified causes); EDITS the
+#                     same comment. Run it in a needs/continue-on-error job.
+#
+# Minimal usage (see examples/github-action/recall-ci.yml for the full
+# two-phase workflow with baseline handling):
+#
+#   - uses: actions/checkout@v4
+#   - uses: skundu42/recallops@main   # pin a release tag in real projects
+#
+# Requirements: recall.yaml at the repo root (`recall init`) and, for a
+# meaningful gate, a baseline .recall store (restored via
+# baseline-cache-key) holding the parent snapshot, dataset, and calibration.
+name: "RecallOps Gate"
+description: "Retrieval regression gate for RAG pipelines: statistical never-flaky CI gate with verified counterfactual root-cause attribution, reported in a self-updating PR comment."
+branding:
+  icon: "check-circle"
+  color: "green"
+
+inputs:
+  phase:
+    description: "'gate' (blocking phase 1) or 'attribute' (async phase 2)."
+    default: "gate"
+  python-version:
+    description: "Python version to set up."
+    default: "3.12"
+  install:
+    description: "pip requirement spec for RecallOps (e.g. 'recallops', 'recallops[pg]', '-e .')."
+    default: "recallops"
+  config:
+    description: "Path to recall.yaml."
+    default: "recall.yaml"
+  max-cost:
+    description: "USD budget for phase-2 counterfactual arms (--max-cost)."
+    default: "5.00"
+  comment:
+    description: "Post/update the PR comment (needs pull-requests: write)."
+    default: "true"
+  github-token:
+    description: "Token for the PR comment."
+    default: "${{ github.token }}"
+  baseline-cache-key:
+    description: "actions/cache key prefix for the baseline .recall store ('' disables restore)."
+    default: "recall-store-main"
+  save-baseline:
+    description: "Save .recall back to the cache after this run. Set true ONLY on main-branch push runs: if PRs saved, a PR's second push would diff against its own first push and regressions would vanish."
+    default: "false"
+
+outputs:
+  diff-id:
+    description: "The diff id produced by phase 1 (empty on first ingest)."
+    value: ${{ steps.run.outputs.diff_id }}
+  gate:
+    description: "'pass', 'fail', 'error' (crash before gating), or 'none' (attribute phase / first ingest)."
+    value: ${{ steps.run.outputs.gate }}
+
+runs:
+  using: "composite"
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - shell: bash
+      run: pip install --quiet ${{ inputs.install }}
+
+    # PRs restore only; the baseline is advanced exclusively by runs that set
+    # save-baseline (main-branch pushes), so a PR can never rebaseline
+    # against itself.
+    - if: ${{ inputs.baseline-cache-key != '' && inputs.phase == 'gate' }}
+      uses: actions/cache/restore@v4
+      with:
+        path: .recall
+        key: ${{ inputs.baseline-cache-key }}
+        restore-keys: |
+          ${{ inputs.baseline-cache-key }}-
+
+    - id: run
+      shell: bash
+      run: |
+        set +e
+        if [ "${{ inputs.phase }}" = "attribute" ]; then
+          DIFF_ID="$(cat recall-diff-id.txt 2>/dev/null)"
+          if [ -z "$DIFF_ID" ]; then
+            echo "No diff id from phase 1 (first ingest / nothing to attribute); skipping."
+            echo "gate=none" >> "$GITHUB_OUTPUT"
+            echo "diff_id=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          recall attribute "$DIFF_ID" --arms auto --max-cost "${{ inputs.max-cost }}" || exit 1
+          recall report --diff "$DIFF_ID" --format md -o recall-report.md
+          echo "diff_id=$DIFF_ID" >> "$GITHUB_OUTPUT"
+          echo "gate=none" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        recall ci --config "${{ inputs.config }}" | tee recall-ci.log
+        code=${PIPESTATUS[0]}
+        DIFF_ID="$(grep -oE 'diff_[0-9a-f]+' recall-ci.log | head -1)"
+        echo "$DIFF_ID" > recall-diff-id.txt
+        echo "diff_id=$DIFF_ID" >> "$GITHUB_OUTPUT"
+        # `recall ci` prints the diff id BEFORE the gate check, so a nonzero
+        # exit with an empty DIFF_ID deterministically means it crashed before
+        # gating (missing recall.yaml, bad DSN, etc.) -- not a retrieval
+        # regression. Only a nonzero exit WITH a diff id is a real gate fail.
+        if [ "$code" != "0" ] && [ -z "$DIFF_ID" ]; then
+          echo "gate=error" >> "$GITHUB_OUTPUT"
+        elif [ "$code" != "0" ]; then
+          echo "gate=fail" >> "$GITHUB_OUTPUT"
+        elif [ -z "$DIFF_ID" ]; then
+          echo "gate=none" >> "$GITHUB_OUTPUT"
+        else
+          echo "gate=pass" >> "$GITHUB_OUTPUT"
+        fi
+
+    - if: ${{ inputs.comment == 'true' && github.event_name == 'pull_request' }}
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: |
+        if [ -f recall-report.md ]; then
+          python -m recallops.pr_comment \
+            --repo "${{ github.repository }}" \
+            --pr "${{ github.event.pull_request.number }}" \
+            --body-file recall-report.md \
+            --slug report \
+            || echo "::warning::RecallOps could not post/update the PR comment (see step log); the gate verdict is unaffected."
+        else
+          echo "No recall-report.md produced; nothing to comment."
+        fi
+
+    - if: ${{ inputs.save-baseline == 'true' && inputs.phase == 'gate' }}
+      uses: actions/cache/save@v4
+      with:
+        path: .recall
+        key: ${{ inputs.baseline-cache-key }}-${{ github.run_id }}
+
+    - if: ${{ steps.run.outputs.gate == 'fail' }}
+      shell: bash
+      run: |
+        echo "::error::RecallOps gate failed: statistically significant retrieval regression."
+        exit 1
+
+    - if: ${{ steps.run.outputs.gate == 'error' }}
+      shell: bash
+      run: |
+        echo "::error::recall ci failed before gating (configuration or environment error, not a retrieval regression); see the step log."
+        exit 1

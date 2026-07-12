@@ -58,6 +58,7 @@ from .ingest import ingest as run_ingest
 from .models import (
     CalibrationRecord,
     DiffResult,
+    GateResult,
     GoldenDataset,
     SnapshotManifest,
     StageSpec,
@@ -164,6 +165,25 @@ def _cost_gate(est_usd: float, max_cost: float | None, yes: bool, label: str) ->
     raise click.ClickException(
         f"Estimated {label} cost ${est_usd:.2f} requires approval; pass --yes or --max-cost N."
     )
+
+
+def _warn_if_empty_collection(adapter, manifest: SnapshotManifest, store: ProjectStore) -> None:
+    """Live metrics against an empty serving collection are silently all-zero
+    (a wrong DSN/path or an ingest that skipped write-through looks like a
+    catastrophic regression). A MISSING collection already fails loudly at
+    query time, so a count that raises is left to that path."""
+    from .ingest import collection_name
+
+    try:
+        n = adapter.count(collection_name(manifest, store.project))
+    except Exception:
+        return
+    if n == 0:
+        console.print(
+            "[yellow]warning:[/yellow] the serving collection for this snapshot is "
+            "empty (0 vectors); live dense metrics will be zeros. Did ingest "
+            "write through this adapter (check adapter config / DSN / path)?"
+        )
 
 
 def _estimate_ingest_cost(store: ProjectStore, source_dir: Path, pipeline, provider) -> dict:
@@ -365,9 +385,12 @@ def snapshot_list() -> None:
     table.add_column("Parent")
     table.add_column("Docs", justify="right")
     table.add_column("Chunks", justify="right")
+    table.add_column("Pinned")
+    pins = store.pinned_snapshots()
     for m in snaps:
         table.add_row(m.snapshot_id, m.parent_snapshot or "-",
-                      str(m.corpus.doc_count), str(m.corpus.chunk_count))
+                      str(m.corpus.doc_count), str(m.corpus.chunk_count),
+                      "*" if m.snapshot_id in pins else "-")
     console.print(table)
 
 
@@ -377,6 +400,26 @@ def snapshot_show(snap: str) -> None:
     store = _store()
     m = _resolve(store, snap)
     console.print_json(json.dumps(m.to_dict()))
+
+
+@snapshot.command("pin")
+@click.argument("snap")
+def snapshot_pin(snap: str) -> None:
+    """Pin a snapshot so `recall gc` never removes it."""
+    store = _store()
+    m = _resolve(store, snap)
+    store.pin_snapshot(m.snapshot_id)
+    console.print(f"Pinned [bold]{m.snapshot_id}[/bold].")
+
+
+@snapshot.command("unpin")
+@click.argument("snap")
+def snapshot_unpin(snap: str) -> None:
+    """Remove a pin (the snapshot becomes eligible for gc again)."""
+    store = _store()
+    m = _resolve(store, snap)
+    store.unpin_snapshot(m.snapshot_id)
+    console.print(f"Unpinned [bold]{m.snapshot_id}[/bold].")
 
 
 @main.group()
@@ -389,11 +432,28 @@ def dataset() -> None:
 @click.option("--seed", default=0)
 @click.option("--name", default="golden")
 @click.option("--snapshot", "snap", default="latest")
-@click.option("--yes", is_flag=True, help="Approve LLM generation cost (unused offline).")
-def dataset_generate(n: int, seed: int, name: str, snap: str, yes: bool) -> None:
+@click.option("--llm", "llm_spec", default=None,
+              help="Generate questions with an LLM, e.g. 'openai' or 'openai:gpt-4o-mini' "
+                   "(uses OPENAI_API_KEY; cost-gated). Default: offline heuristic, $0.")
+@click.option("--yes", is_flag=True, help="Approve the LLM generation cost.")
+@click.option("--max-cost", type=float, default=None, help="LLM cost budget in USD.")
+def dataset_generate(n: int, seed: int, name: str, snap: str, llm_spec: str | None,
+                     yes: bool, max_cost: float | None) -> None:
     store = _store()
     m = _resolve(store, snap)
-    ds = ds_generate(store, m, n=n, seed=seed, name=name)
+    llm = None
+    if llm_spec:
+        from .llm import estimate_generation_cost, get_llm
+
+        try:
+            llm = get_llm(llm_spec)
+        except ValueError as exc:
+            raise click.ClickException(str(exc))
+        records = RetrievalEngine(store, m).chunks()
+        avg_tokens = (sum(len(r.text) // 4 for r in records) / len(records)) if records else 0.0
+        est = estimate_generation_cost(llm.model, n, avg_tokens)
+        _cost_gate(est, max_cost, yes, "LLM dataset generation")
+    ds = ds_generate(store, m, n=n, seed=seed, name=name, llm=llm)
     store.save_dataset(ds)
     console.print(f"[bold]{ds.dataset_id}[/bold]: {len(ds.cases)} cases")
     strat = stratification_report(ds)
@@ -459,7 +519,9 @@ def dataset_show(dataset_id: str) -> None:
 @click.argument("dataset_id")
 @click.option("--accept", default="", help="Comma-separated case ids to accept.")
 @click.option("--reject", default="", help="Comma-separated case ids to reject.")
-def dataset_curate(dataset_id: str, accept: str, reject: str) -> None:
+@click.option("--edit-file", "edit_file", default=None,
+              help="JSONL of edits: one {\"id\": ..., \"question\"|\"expected_sources\"|\"tags\": ...} per line.")
+def dataset_curate(dataset_id: str, accept: str, reject: str, edit_file: str | None) -> None:
     store = _store()
     try:
         ds = store.get_dataset(dataset_id)
@@ -470,7 +532,21 @@ def dataset_curate(dataset_id: str, accept: str, reject: str) -> None:
         decisions[cid] = "accept"
     for cid in (c.strip() for c in reject.split(",") if c.strip()):
         decisions[cid] = "reject"
-    curated = ds_curate(ds, decisions)
+    edits: dict[str, dict] = {}
+    if edit_file:
+        for line in Path(edit_file).read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            rec = json.loads(line)
+            try:
+                case_id = rec.pop("id")
+            except KeyError:
+                raise click.ClickException(f"edit record missing 'id': {line!r}")
+            edits[case_id] = rec
+    try:
+        curated = ds_curate(ds, decisions, edits=edits)
+    except ValueError as exc:
+        raise click.ClickException(str(exc))
     store.save_dataset(curated)
     console.print(f"[bold]{curated.dataset_id}[/bold]: {len(curated.cases)} cases after curation")
 
@@ -500,6 +576,8 @@ def eval(dataset_id: str | None, snap: str, replay: bool, gate: str | None,
     mode = "replay" if replay else "live"
     adapter = None if replay else build_adapter(cfg, store)
     try:
+        if adapter is not None:
+            _warn_if_empty_collection(adapter, m, store)
         ev = evaluate(store, m, ds, adapter=adapter, k_values=ks, mode=mode)
         console.print(eval_table(ev))
 
@@ -565,6 +643,7 @@ def calibrate(snap: str, dataset_id: str | None, runs: int, config_path: str) ->
     ds = _get_dataset(store, dataset_id)
     adapter = build_adapter(cfg, store)
     try:
+        _warn_if_empty_collection(adapter, m, store)
         record = run_calibrate(store, m, ds, adapter, n_runs=runs,
                                primary_metric=cfg.gate.get("primary_metric", "recall@5"))
     finally:
@@ -846,6 +925,9 @@ def ci(config_path: str, base: str | None, dataset_id: str | None, out: str) -> 
         except GateNotCalibrated:
             gate = None
 
+    if gate is not None:
+        store.save_json("gate", dr.diff_id, gate.to_dict())
+
     markdown = diff_summary_markdown(dr, None, gate, calibration_ok=calib_raw is not None)
     Path(out).write_text(markdown, encoding="utf-8")
     console.print(f"Wrote {out}.")
@@ -874,12 +956,17 @@ def report(diff_id: str, fmt: str, out: str | None) -> None:
 
     attributions = {qid: AttributionReport.from_dict(a) for qid, a in attr_raw.items()}
 
+    gate_raw = store.get_json("gate", diff_id)
+    gate = GateResult.from_dict(gate_raw) if gate_raw else None
+    calibration_ok = store.get_json("calibration", dr.snapshot_a) is not None
+
     if fmt == "json":
         rendered = json.dumps(render_diff_json(dr, attributions or None), indent=2)
     elif fmt == "html":
-        rendered = diff_report_html(dr, attributions or None, gate=None)
+        rendered = diff_report_html(dr, attributions or None, gate=gate)
     else:
-        rendered = diff_summary_markdown(dr, attributions or None, gate=None, calibration_ok=False)
+        rendered = diff_summary_markdown(dr, attributions or None, gate=gate,
+                                         calibration_ok=calibration_ok)
 
     if out:
         Path(out).write_text(rendered, encoding="utf-8")
@@ -893,10 +980,12 @@ def report(diff_id: str, fmt: str, out: str | None) -> None:
 def gc(keep: int) -> None:
     """Garbage-collect old snapshots' artifacts."""
     store = _store()
-    result = store.gc(keep_last=keep)
+    pinned = store.pinned_snapshots()
+    result = store.gc(keep_last=keep, pinned=pinned)
     console.print(
         f"Removed {result['removed_chunksets']} chunkset(s), "
-        f"{result['removed_emb_files']} embedding file(s)."
+        f"{result['removed_emb_files']} embedding file(s); "
+        f"{len(pinned)} pinned snapshot(s) kept."
     )
 
 

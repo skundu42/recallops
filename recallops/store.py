@@ -75,6 +75,11 @@ CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS query_embeddings (
+    key TEXT PRIMARY KEY,
+    dims INTEGER NOT NULL,
+    vec BLOB NOT NULL
+);
 """
 
 _CHUNK_FIELDS = (
@@ -120,18 +125,39 @@ class ProjectStore:
         if project:
             self.set_meta("project", project)
         self.project = project or self.get_meta("project") or ""
-        # In-memory, per-process cache of query embeddings (keyed by
-        # embedding_key). Eval/calibration/ablation loops re-query the same
-        # golden questions many times; without this a network embedding provider
-        # re-embeds each query on every pass, slow and re-billed. fp32, so it
-        # never changes replay precision.
+        # Query embeddings, keyed by embedding_key: an in-memory dict fronting
+        # the persistent query_embeddings table. Eval/calibration/ablation
+        # loops re-query the same golden questions many times, and every CI
+        # run is a NEW process; without persistence a network provider
+        # re-embeds (and re-bills) each query per run (FR-1.5). Stored as
+        # fp32 BLOBs (a few KB per query), never fp16, so replay precision is
+        # identical whether a vector is computed or loaded. Kept separate
+        # from the chunk-embedding parquet cache because query-space vectors
+        # differ from document-space vectors for the same text (Cohere/Voyage
+        # input_type).
         self._query_vectors: dict = {}
 
     def query_vector_cached(self, key: str):
-        return self._query_vectors.get(key)
+        vec = self._query_vectors.get(key)
+        if vec is not None:
+            return vec
+        row = self._conn.execute(
+            "SELECT dims, vec FROM query_embeddings WHERE key = ?", (key,)
+        ).fetchone()
+        if row is None:
+            return None
+        vec = np.frombuffer(row["vec"], dtype=np.float32).reshape(int(row["dims"])).copy()
+        self._query_vectors[key] = vec
+        return vec
 
     def cache_query_vector(self, key: str, vec) -> None:
-        self._query_vectors[key] = vec
+        arr = np.asarray(vec, dtype=np.float32).reshape(-1)
+        self._query_vectors[key] = arr
+        with self._conn:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO query_embeddings (key, dims, vec) VALUES (?, ?, ?)",
+                (key, int(arr.shape[0]), arr.tobytes()),
+            )
 
     def set_meta(self, key: str, value: str) -> None:
         with self._conn:
@@ -144,6 +170,22 @@ class ProjectStore:
     def get_meta(self, key: str) -> str | None:
         row = self._conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
         return row["value"] if row else None
+
+    # -- pins (FR-1.8: gc keeps last N + pinned) --------------------------------
+
+    def pinned_snapshots(self) -> set[str]:
+        raw = self.get_meta("pinned_snapshots")
+        return set(json.loads(raw)) if raw else set()
+
+    def pin_snapshot(self, snapshot_id: str) -> None:
+        pins = self.pinned_snapshots()
+        pins.add(snapshot_id)
+        self.set_meta("pinned_snapshots", json.dumps(sorted(pins)))
+
+    def unpin_snapshot(self, snapshot_id: str) -> None:
+        pins = self.pinned_snapshots()
+        pins.discard(snapshot_id)
+        self.set_meta("pinned_snapshots", json.dumps(sorted(pins)))
 
     def close(self) -> None:
         self._conn.close()
@@ -508,7 +550,7 @@ class ProjectStore:
 
         # Index rows go first, in one transaction: interrupted mid-gc, the
         # worst case is an orphan artifact file. The reverse order leaves rows
-        # for deleted files — a snapshot listed without its artifacts, or an
+        # for deleted files - a snapshot listed without its artifacts, or an
         # embeddings row whose missing parquet makes later ingests skip
         # re-embedding and commit vector-less snapshots.
         with self._conn:
